@@ -1,0 +1,118 @@
+"""
+统一配置文件
+"""
+import os
+import socket
+
+
+def is_port_available(port):
+    """检查端口是否可用"""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(1)
+            s.bind(('127.0.0.1', port))
+            return True
+    except OSError:
+        return False
+
+
+def find_available_port(start_port, max_attempts=10):
+    """从起始端口开始查找可用端口"""
+    for i in range(max_attempts):
+        port = start_port + i
+        if is_port_available(port):
+            return port
+    return start_port  # 找不到就返回原端口
+
+
+# ==================== 代理配置 ====================
+PROXY_HOST = os.environ.get('PROXY_HOST', '127.0.0.1')
+PROXY_PORT = os.environ.get('PROXY_PORT', '7890')
+PROXIES = {
+    "http": f"http://{PROXY_HOST}:{PROXY_PORT}",
+    "https": f"http://{PROXY_HOST}:{PROXY_PORT}",
+}
+
+# ==================== API Keys ====================
+DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY', 'YOUR_API_KEY')
+DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
+
+# ==================== 服务端口 ====================
+# 优先使用环境变量，否则使用默认值
+# 启动脚本会设置环境变量来确保所有服务使用相同端口
+
+_DEFAULT_PORTS = {
+    'news': 5050,
+    'token': 5051,
+    'tracker': 5052,
+    'match': 5053,
+    'dashboard': 5080,  # 避免 5060 (SIP 协议端口，浏览器会阻止)
+}
+
+def get_port(name):
+    """获取服务端口 (优先环境变量)"""
+    env_key = f"MEME_{name.upper()}_PORT"
+    env_val = os.environ.get(env_key)
+    if env_val:
+        return int(env_val)
+    return _DEFAULT_PORTS.get(name, 5000)
+
+# 服务端口
+NEWS_PORT = get_port('news')
+TOKEN_PORT = get_port('token')
+TRACKER_PORT = get_port('tracker')
+MATCH_PORT = get_port('match')
+DASHBOARD_PORT = get_port('dashboard')
+
+# ==================== 服务地址 ====================
+# 注意：使用函数获取 URL，确保读取最新的环境变量端口
+def get_service_url(name):
+    """获取服务 URL"""
+    return f"http://127.0.0.1:{get_port(name)}"
+
+def print_ports():
+    """打印当前使用的端口"""
+    print("服务端口分配:")
+    print(f"  推文发现: {NEWS_PORT}")
+    print(f"  代币发现: {TOKEN_PORT}")
+    print(f"  代币跟踪: {TRACKER_PORT}")
+    print(f"  代币撮合: {MATCH_PORT}")
+    print(f"  控制面板: {DASHBOARD_PORT}")
+
+# ==================== Binance API ====================
+BINANCE_NEWS_URL = "https://web3.binance.com/bapi/defi/v2/private/wallet-direct/tracker/twitter/event/list"
+BINANCE_TOKEN_URL = "https://web3.binance.com/bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/pulse/rank/list?r=10"
+
+# ==================== DexScreener API ====================
+DEXSCREENER_API = "https://api.dexscreener.com/latest/dex/tokens"
+
+# ==================== 通用 Headers ====================
+HEADERS = {
+    "accept": "*/*",
+    "accept-language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
+    "bnc-level": "0",
+    "bnc-location": "CN",
+    "bnc-time-zone": "Asia/Shanghai",
+    "bnc-uuid": "YOUR_UUID",
+    "clienttype": "web",
+    "clientversion": "1.2.0",
+    "content-type": "application/json",
+    "csrftoken": "YOUR_TOKEN",
+    "lang": "en",
+    "origin": "https://web3.binance.com",
+    "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+}
+
+# ==================== Cookies ====================
+# 从 news_event.py 同步的完整登录 cookies
+COOKIE_STR = os.environ.get('BINANCE_COOKIES',
+    "YOUR_COOKIES"
+)
+COOKIES = {item.split("=")[0]: item.split("=", 1)[1] for item in COOKIE_STR.split("; ") if "=" in item}
+
+# ==================== 业务配置 ====================
+TIME_WINDOW_MS = 60 * 1000  # 匹配时间窗口: 60秒
+TRACK_INTERVALS = [60, 300, 600]  # 追踪时间点: 1/5/10分钟
+
+# ==================== 数据库 ====================
+DB_PATH = os.environ.get('DB_PATH', 'token_tracker.db')
