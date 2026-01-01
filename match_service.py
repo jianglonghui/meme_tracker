@@ -1,15 +1,21 @@
 """
 代币撮合服务 (端口 5053)
 - 监听推文流和代币流
-- 使用 DeepSeek 提取关键词
+- 使用 DeepSeek/Gemini 提取关键词（Gemini 支持图片）
 - 匹配代币并发送到跟踪服务
 """
 import requests
 import json
 import threading
 import time
+import os
+import hashlib
 from flask import Flask, jsonify
 import config
+
+# 图片缓存目录（与 dashboard 共用）
+MEDIA_CACHE_DIR = os.path.join(os.path.dirname(__file__), 'media_cache')
+os.makedirs(MEDIA_CACHE_DIR, exist_ok=True)
 
 app = Flask(__name__)
 
@@ -112,6 +118,137 @@ def call_deepseek(news_content):
         log_error(f"DeepSeek API: {e}")
         print(f"[DeepSeek] 异常: {e}", flush=True)
     return []
+
+
+def get_cached_image(url):
+    """获取缓存的图片路径，如果不存在则下载"""
+    try:
+        # 使用 URL 的 MD5 作为文件名（与 dashboard 一致）
+        cache_key = hashlib.md5(url.encode()).hexdigest()
+
+        # 检查各种扩展名
+        for ext in ['.jpg', '.png', '.gif', '.webp', '']:
+            cache_path = os.path.join(MEDIA_CACHE_DIR, f"{cache_key}{ext}")
+            if os.path.exists(cache_path) and os.path.getsize(cache_path) > 1000:
+                return cache_path
+
+        # 缓存不存在，下载图片
+        ext = '.jpg'
+        if '.png' in url.lower():
+            ext = '.png'
+        elif '.gif' in url.lower():
+            ext = '.gif'
+        cache_path = os.path.join(MEDIA_CACHE_DIR, f"{cache_key}{ext}")
+
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+        }
+        resp = requests.get(url, timeout=10, proxies=config.PROXIES, headers=headers)
+        if resp.status_code == 200 and len(resp.content) > 1000:
+            with open(cache_path, 'wb') as f:
+                f.write(resp.content)
+            return cache_path
+    except Exception as e:
+        print(f"[图片] 获取失败: {e}", flush=True)
+    return None
+
+
+def call_gemini_vision(news_content, image_paths=None):
+    """调用 Gemini API 提取关键词（支持图片）"""
+    if not config.GEMINI_API_KEY:
+        return []
+
+    try:
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=config.GEMINI_API_KEY)
+
+        prompt = f"""作为meme币分析师，从推文内容和图片中提取可能被用作代币名称的关键词。
+
+提取原则：
+- 从文字和图片中都提取关键词
+- 只提取推文原文中的词，不翻译不推断
+- 如果图片中有文字，提取图片中的关键词
+- 中文短语保持完整
+- 包含：缩写、数字年份、名词短语、情绪词、人名地名、图片中的标语/文字
+- 排除：链接、@用户名、冠词介词
+
+推文内容：{news_content}
+
+返回JSON数组格式，只返回数组，不要其他内容："""
+
+        # 构建 parts
+        parts = [types.Part.from_text(text=prompt)]
+
+        # 添加图片
+        if image_paths:
+            for img_path in image_paths[:3]:  # 最多3张图片
+                try:
+                    with open(img_path, 'rb') as f:
+                        img_data = f.read()
+                    # 判断 MIME 类型
+                    mime_type = "image/jpeg"
+                    if img_path.lower().endswith('.png'):
+                        mime_type = "image/png"
+                    elif img_path.lower().endswith('.gif'):
+                        mime_type = "image/gif"
+                    parts.append(types.Part.from_bytes(data=img_data, mime_type=mime_type))
+                except Exception as e:
+                    print(f"[Gemini] 添加图片失败: {e}", flush=True)
+
+        contents = [types.Content(role="user", parts=parts)]
+
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=contents,
+        )
+
+        result_text = response.text.strip()
+
+        # 解析 JSON 数组
+        if result_text.startswith('['):
+            keywords = json.loads(result_text)
+            return [k.lower() for k in keywords if isinstance(k, str)]
+        elif '```json' in result_text:
+            json_part = result_text.split('```json')[1].split('```')[0].strip()
+            keywords = json.loads(json_part)
+            return [k.lower() for k in keywords if isinstance(k, str)]
+        elif '[' in result_text:
+            start = result_text.index('[')
+            end = result_text.rindex(']') + 1
+            keywords = json.loads(result_text[start:end])
+            return [k.lower() for k in keywords if isinstance(k, str)]
+
+    except ImportError:
+        log_error("Gemini: 需要安装 google-genai")
+        print("[Gemini] 需要安装 google-genai: pip install google-genai", flush=True)
+    except Exception as e:
+        log_error(f"Gemini API: {e}")
+        print(f"[Gemini] 异常: {e}", flush=True)
+    return []
+
+
+def extract_keywords(content, image_urls=None):
+    """提取关键词：有图片时使用 Gemini，否则使用 DeepSeek"""
+    # 如果有图片且配置了 Gemini，优先使用 Gemini
+    if image_urls and config.GEMINI_API_KEY:
+        # 获取缓存的图片（优先使用 dashboard 已下载的）
+        image_paths = []
+        for url in image_urls[:3]:
+            path = get_cached_image(url)
+            if path:
+                image_paths.append(path)
+
+        if image_paths:
+            print(f"[Gemini] 处理 {len(image_paths)} 张图片...", flush=True)
+            keywords = call_gemini_vision(content, image_paths)
+            if keywords:
+                return keywords, 'gemini'
+
+    # 回退到 DeepSeek（纯文本）
+    keywords = call_deepseek(content)
+    return keywords, 'deepseek'
 
 
 def calculate_match_score(keywords, symbol, name):
@@ -265,8 +402,10 @@ def fetch_news_stream():
                         author = data.get('author', '')
                         event_type = data.get('type', '')
                         news_time = data.get('time', 0)
+                        images = data.get('images', []) or []
 
-                        keywords = call_deepseek(content)
+                        # 使用 Gemini（有图片时）或 DeepSeek 提取关键词
+                        keywords, api_used = extract_keywords(content, images if images else None)
                         matched_tokens, tokens_in_window, window_token_names = match_tokens(news_time, keywords)
 
                         # 记录每次撮合尝试
@@ -277,15 +416,26 @@ def fetch_news_stream():
                             stats['last_match'] = time.time()
                             log_match(author, content, matched_tokens)
 
-                            print(f"\n[匹配] @{author}: {content[:50]}...", flush=True)
+                            api_tag = "[Gemini+图片]" if api_used == 'gemini' else "[DeepSeek]"
+                            print(f"\n[匹配] {api_tag} @{author}: {content[:50]}...", flush=True)
                             print(f"  关键词: {keywords}", flush=True)
                             print(f"  匹配代币: {len(matched_tokens)} 个", flush=True)
 
+                            # 发送完整推文数据（与前端一致）
                             news_data = {
                                 'time': news_time,
                                 'author': author,
+                                'authorName': data.get('authorName', ''),
+                                'avatar': data.get('avatar', ''),
                                 'type': event_type,
-                                'content': content
+                                'content': content,
+                                'images': images,
+                                'videos': data.get('videos', []) or [],
+                                'refAuthor': data.get('refAuthor', ''),
+                                'refAuthorName': data.get('refAuthorName', ''),
+                                'refAvatar': data.get('refAvatar', ''),
+                                'refContent': data.get('refContent', ''),
+                                'refImages': data.get('refImages', []) or [],
                             }
                             send_to_tracker(news_data, keywords, matched_tokens)
 

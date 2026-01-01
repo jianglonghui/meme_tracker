@@ -118,13 +118,34 @@ def stream():
                 if len(news_list) > last_idx:
                     for item in news_list[last_idx:]:
                         user = item.get('user') or {}
+                        ref_user = item.get('referenceUser') or {}
+                        event_type = item.get('eventType', '')
+
+                        # 解析图片和视频
+                        images = parse_json_field(item.get('fileUrls') or '')
+                        videos = parse_json_field(item.get('videoUrls') or '')
+                        ref_images = parse_json_field(item.get('referencedFiles') or '')
+
+                        # 原推内容
+                        ref_content = ''
+                        if event_type in ('reply', 'retweet', 'quote'):
+                            ref_content = item.get('contentOld') or ''
+
                         event_data = {
                             'id': item.get('eventTime'),
-                            'type': item.get('eventType', ''),
+                            'type': event_type,
                             'time': item.get('eventTime', ''),
                             'author': user.get('handle', 'Unknown'),
                             'authorName': user.get('username', ''),
+                            'avatar': user.get('profilePic', ''),
                             'content': item.get('contentNew') or '',
+                            'images': images,
+                            'videos': videos,
+                            'refAuthor': ref_user.get('handle', ''),
+                            'refAuthorName': ref_user.get('username', ''),
+                            'refAvatar': ref_user.get('profilePic', ''),
+                            'refContent': ref_content,
+                            'refImages': ref_images,
                         }
                         yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
                     last_idx = len(news_list)

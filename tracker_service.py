@@ -36,11 +36,28 @@ def init_db():
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS match_records (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            news_time INTEGER, news_author TEXT, news_type TEXT,
-            news_content TEXT, keywords TEXT,
+            news_time INTEGER, news_author TEXT, news_author_name TEXT,
+            news_avatar TEXT, news_type TEXT, news_content TEXT,
+            news_images TEXT, news_videos TEXT,
+            ref_author TEXT, ref_author_name TEXT, ref_avatar TEXT,
+            ref_content TEXT, ref_images TEXT,
+            keywords TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+
+    # 兼容旧表：添加新字段
+    new_columns = [
+        ('news_author_name', 'TEXT'), ('news_avatar', 'TEXT'),
+        ('news_images', 'TEXT'), ('news_videos', 'TEXT'),
+        ('ref_author', 'TEXT'), ('ref_author_name', 'TEXT'),
+        ('ref_avatar', 'TEXT'), ('ref_content', 'TEXT'), ('ref_images', 'TEXT')
+    ]
+    for col, col_type in new_columns:
+        try:
+            cursor.execute(f'ALTER TABLE match_records ADD COLUMN {col} {col_type}')
+        except:
+            pass
 
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS matched_tokens (
@@ -109,13 +126,26 @@ def save_match_record(news_data, keywords, matched_tokens):
     cursor = conn.cursor()
 
     cursor.execute('''
-        INSERT INTO match_records (news_time, news_author, news_type, news_content, keywords)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO match_records (
+            news_time, news_author, news_author_name, news_avatar, news_type,
+            news_content, news_images, news_videos,
+            ref_author, ref_author_name, ref_avatar, ref_content, ref_images,
+            keywords
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
         news_data.get('time', 0),
         news_data.get('author', ''),
+        news_data.get('authorName', ''),
+        news_data.get('avatar', ''),
         news_data.get('type', ''),
         news_data.get('content', ''),
+        json.dumps(news_data.get('images', []), ensure_ascii=False),
+        json.dumps(news_data.get('videos', []), ensure_ascii=False),
+        news_data.get('refAuthor', ''),
+        news_data.get('refAuthorName', ''),
+        news_data.get('refAvatar', ''),
+        news_data.get('refContent', ''),
+        json.dumps(news_data.get('refImages', []), ensure_ascii=False),
         json.dumps(keywords, ensure_ascii=False)
     ))
     match_id = cursor.lastrowid
@@ -268,16 +298,66 @@ def tracking_worker():
 def query_best_tokens(limit=10):
     """查询推文及最佳代币"""
     conn = sqlite3.connect(config.DB_PATH)
+    conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
-    cursor.execute('SELECT id, news_author, news_content FROM match_records ORDER BY created_at DESC LIMIT ?', (limit,))
+    cursor.execute('''
+        SELECT id, news_time, news_author, news_author_name, news_avatar, news_type,
+               news_content, news_images, news_videos,
+               ref_author, ref_author_name, ref_avatar, ref_content, ref_images,
+               keywords, created_at
+        FROM match_records ORDER BY created_at DESC LIMIT ?
+    ''', (limit,))
     records = cursor.fetchall()
 
     results = []
-    for mid, author, content in records:
-        cursor.execute('SELECT token_symbol, token_name FROM top_performers WHERE match_id = ? ORDER BY performance_rank', (mid,))
-        tokens = [{'symbol': r[0], 'name': r[1]} for r in cursor.fetchall()]
-        results.append({'author': author, 'content': content, 'best_tokens': tokens})
+    for row in records:
+        mid = row['id']
+
+        # 查询匹配的代币
+        cursor.execute('''
+            SELECT token_symbol, token_name, token_address, chain,
+                   initial_market_cap, initial_holders, match_score, match_keyword
+            FROM matched_tokens WHERE match_id = ? ORDER BY rank
+        ''', (mid,))
+        matched = [dict(r) for r in cursor.fetchall()]
+
+        # 查询最佳表现代币
+        cursor.execute('''
+            SELECT token_symbol, token_name, market_cap_change_pct, performance_score
+            FROM top_performers WHERE match_id = ? ORDER BY performance_rank
+        ''', (mid,))
+        top = [dict(r) for r in cursor.fetchall()]
+
+        # 解析 JSON 字段
+        def parse_json(val):
+            if not val:
+                return []
+            try:
+                return json.loads(val)
+            except:
+                return []
+
+        results.append({
+            'id': mid,
+            'time': row['news_time'],
+            'author': row['news_author'],
+            'authorName': row['news_author_name'] or '',
+            'avatar': row['news_avatar'] or '',
+            'type': row['news_type'],
+            'content': row['news_content'],
+            'images': parse_json(row['news_images']),
+            'videos': parse_json(row['news_videos']),
+            'refAuthor': row['ref_author'] or '',
+            'refAuthorName': row['ref_author_name'] or '',
+            'refAvatar': row['ref_avatar'] or '',
+            'refContent': row['ref_content'] or '',
+            'refImages': parse_json(row['ref_images']),
+            'keywords': parse_json(row['keywords']),
+            'matched_tokens': matched,
+            'best_tokens': top,
+            'created_at': row['created_at']
+        })
 
     conn.close()
     return results
