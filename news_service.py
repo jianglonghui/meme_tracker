@@ -151,6 +151,18 @@ def status():
     })
 
 
+def parse_json_field(field):
+    """解析可能是JSON字符串的字段"""
+    if isinstance(field, list):
+        return field
+    if isinstance(field, str) and field.startswith('['):
+        try:
+            return json.loads(field)
+        except:
+            pass
+    return []
+
+
 @app.route('/recent')
 def recent():
     """返回最近的推文和错误"""
@@ -162,11 +174,34 @@ def recent():
     items = []
     for item in recent_items:
         user = item.get('user') or {}
+        ref_user = item.get('referenceUser') or {}
+        event_type = item.get('eventType', '')
+        content = item.get('contentNew') or ''
+
+        # 解析图片和视频
+        images = parse_json_field(item.get('fileUrls') or '')
+        videos = parse_json_field(item.get('videoUrls') or '')
+        ref_images = parse_json_field(item.get('referencedFiles') or '')
+
+        # 原推内容（reply/retweet/quote时）
+        ref_content = ''
+        if event_type in ('reply', 'retweet', 'quote'):
+            ref_content = item.get('contentOld') or ''
+
         items.append({
             'author': user.get('handle', 'Unknown'),
-            'content': (item.get('contentNew') or '')[:100],
-            'type': item.get('eventType', ''),
-            'time': item.get('eventTime', 0)
+            'authorName': user.get('username', ''),
+            'avatar': user.get('profilePic', ''),
+            'content': content,
+            'type': event_type,
+            'time': item.get('eventTime', 0),
+            'images': images,
+            'videos': videos,
+            'refAuthor': ref_user.get('handle', ''),
+            'refAuthorName': ref_user.get('username', ''),
+            'refAvatar': ref_user.get('profilePic', ''),
+            'refContent': ref_content,
+            'refImages': ref_images
         })
     return jsonify({'items': items, 'errors': recent_errors})
 

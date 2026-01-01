@@ -1,2 +1,3 @@
 config.py
 token_tracker.db
+media_cache

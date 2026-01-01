@@ -27,8 +27,9 @@ token_list = []
 token_lock = threading.Lock()
 MAX_TOKENS = 500  # 缓存上限
 
-# 最近匹配和错误日志
+# 最近匹配、撮合尝试和错误日志
 recent_matches = []
+recent_attempts = []
 recent_errors = []
 log_lock = threading.Lock()
 MAX_LOG_SIZE = 20
@@ -41,6 +42,22 @@ def log_error(msg):
         if len(recent_errors) > MAX_LOG_SIZE:
             recent_errors.pop(0)
     stats['errors'] += 1
+
+
+def log_attempt(author, content, keywords, tokens_in_window, matched_count, window_token_names):
+    """记录撮合尝试"""
+    with log_lock:
+        recent_attempts.append({
+            'time': time.time(),
+            'author': author,
+            'content': content[:100],
+            'keywords': keywords[:5] if keywords else [],
+            'tokens_in_window': tokens_in_window,
+            'matched': matched_count,
+            'window_tokens': window_token_names[:5] if window_token_names else []
+        })
+        if len(recent_attempts) > MAX_LOG_SIZE:
+            recent_attempts.pop(0)
 
 
 def log_match(author, content, tokens):
@@ -138,12 +155,14 @@ def calculate_match_score(keywords, symbol, name):
 
 
 def match_tokens(news_time, keywords):
-    """匹配时间窗口内的代币"""
+    """匹配时间窗口内的代币，返回 (匹配列表, 窗口内代币数, 窗口内代币名称列表)"""
     if not news_time:
-        return []
+        return [], 0, []
 
     news_time_ms = news_time * 1000
     matched = []
+    tokens_in_window = 0
+    window_token_names = []
 
     with token_lock:
         for token in token_list:
@@ -153,8 +172,10 @@ def match_tokens(news_time, keywords):
 
             time_diff = abs(create_time - news_time_ms)
             if time_diff <= config.TIME_WINDOW_MS:
+                tokens_in_window += 1
                 symbol = (token.get('tokenSymbol') or '').lower()
                 name = (token.get('tokenName') or '').lower()
+                window_token_names.append(token.get('tokenSymbol') or token.get('tokenName') or 'Unknown')
 
                 if keywords:
                     score, matched_kw, match_type = calculate_match_score(keywords, symbol, name)
@@ -168,7 +189,7 @@ def match_tokens(news_time, keywords):
                         matched.append(token_copy)
 
     matched.sort(key=lambda x: x.get('_final_score', 0), reverse=True)
-    return matched
+    return matched, tokens_in_window, window_token_names
 
 
 def send_to_tracker(news_data, keywords, matched_tokens):
@@ -246,7 +267,10 @@ def fetch_news_stream():
                         news_time = data.get('time', 0)
 
                         keywords = call_deepseek(content)
-                        matched_tokens = match_tokens(news_time, keywords)
+                        matched_tokens, tokens_in_window, window_token_names = match_tokens(news_time, keywords)
+
+                        # 记录每次撮合尝试
+                        log_attempt(author, content, keywords, tokens_in_window, len(matched_tokens), window_token_names)
 
                         if matched_tokens:
                             stats['total_matches'] += 1
@@ -287,12 +311,14 @@ def status():
 
 @app.route('/recent')
 def recent():
-    """返回最近的匹配和错误"""
+    """返回最近的匹配、撮合尝试和错误"""
     with log_lock:
         matches = list(recent_matches)[::-1]
+        attempts = list(recent_attempts)[::-1]
         errors = list(recent_errors)[::-1]
     return jsonify({
         'matches': matches,
+        'attempts': attempts,
         'errors': errors
     })
 

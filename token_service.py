@@ -21,9 +21,8 @@ stats = {
     'errors': 0
 }
 
-# 去重和代币列表
-seen_ids = set()
-token_list = []
+# 代币字典 (key: tokenAddress, value: token data)
+token_dict = {}
 token_lock = threading.Lock()
 
 # 错误日志
@@ -73,22 +72,34 @@ def fetch_tokens():
     return None
 
 
-def get_new_items(data):
+def process_tokens(data):
+    """处理代币数据，返回 (新代币列表, 更新数量)"""
     new_items = []
+    updated_count = 0
+
     if not data or 'data' not in data:
-        return new_items
+        return new_items, updated_count
 
     items = data.get('data', [])
     if isinstance(items, dict):
         items = items.get('list', []) or items.get('tokens', []) or []
 
-    for item in items:
-        token_id = item.get('contractAddress', '') or item.get('tokenAddress', '')
-        if token_id and token_id not in seen_ids:
-            seen_ids.add(token_id)
-            new_items.append(item)
+    with token_lock:
+        for item in items:
+            token_id = item.get('contractAddress', '') or item.get('tokenAddress', '')
+            if not token_id:
+                continue
 
-    return new_items
+            if token_id in token_dict:
+                # 更新已有代币数据
+                token_dict[token_id].update(item)
+                updated_count += 1
+            else:
+                # 新代币
+                token_dict[token_id] = item
+                new_items.append(item)
+
+    return new_items, updated_count
 
 
 def token_fetcher():
@@ -96,26 +107,25 @@ def token_fetcher():
     while stats['running']:
         data = fetch_tokens()
         stats['last_fetch'] = time.time()
-        new_items = get_new_items(data)
+        new_items, updated_count = process_tokens(data)
         if new_items:
-            with token_lock:
-                for item in new_items:
-                    token_list.append(item)
-                    stats['total_tokens'] += 1
-                    symbol = item.get('symbol', '') or item.get('tokenSymbol', 'Unknown')
-                    print(f"[新币] {symbol}", flush=True)
+            stats['total_tokens'] += len(new_items)
+            for item in new_items:
+                symbol = item.get('symbol', '') or item.get('tokenSymbol', 'Unknown')
+                print(f"[新币] {symbol}", flush=True)
         time.sleep(1)
 
 
 @app.route('/stream')
 def stream():
     def generate():
-        last_idx = 0
+        sent_ids = set()
         heartbeat_count = 0
         while True:
             with token_lock:
-                if len(token_list) > last_idx:
-                    for item in token_list[last_idx:]:
+                for token_id, item in token_dict.items():
+                    if token_id not in sent_ids:
+                        sent_ids.add(token_id)
                         token_data = {
                             'tokenAddress': item.get('contractAddress', '') or item.get('tokenAddress', ''),
                             'tokenSymbol': item.get('symbol', '') or item.get('tokenSymbol', ''),
@@ -128,8 +138,7 @@ def stream():
                             'createTime': item.get('createTime', ''),
                         }
                         yield f"data: {json.dumps(token_data, ensure_ascii=False)}\n\n"
-                    last_idx = len(token_list)
-                    heartbeat_count = 0
+                        heartbeat_count = 0
             # 每30次循环(约15秒)发送心跳
             heartbeat_count += 1
             if heartbeat_count >= 30:
@@ -156,7 +165,9 @@ def status():
 def recent():
     """返回最近的代币和错误"""
     with token_lock:
-        recent_items = token_list[-10:][::-1]
+        # 按创建时间排序，取最新10个
+        sorted_tokens = sorted(token_dict.values(), key=lambda x: x.get('createTime', 0), reverse=True)
+        recent_items = sorted_tokens[:10]
     with error_lock:
         recent_errors = list(error_log)[::-1]
 
