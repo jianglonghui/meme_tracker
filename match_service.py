@@ -688,8 +688,17 @@ def fetch_news_stream():
                             print(f"[过滤] @{author} 推文过期 ({age_hours:.1f}小时前)", flush=True)
                             continue
 
+                        # 合并内容（包括引用推文内容）
+                        ref_content = data.get('refContent', '') or ''
+                        full_content = content
+                        if ref_content:
+                            full_content = f"{content}\n\n引用推文: {ref_content}" if content else ref_content
+                        # 合并图片（包括引用推文图片）
+                        ref_images = data.get('refImages', []) or []
+                        all_images = images + ref_images if ref_images else images
+
                         # 使用 Gemini（有图片时）或 DeepSeek 提取关键词
-                        keywords, api_used = extract_keywords(content, images if images else None)
+                        keywords, api_used = extract_keywords(full_content, all_images if all_images else None)
 
                         if not keywords:
                             log_filtered(author, content, "无法提取关键词", news_time)

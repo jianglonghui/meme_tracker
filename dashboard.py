@@ -262,7 +262,18 @@ HTML_TEMPLATE = """
             return `${h}:${m}:${s}`;
         }
 
+        let lastServicesJson = '';
+        let tokenChainFilter = 'ALL';
+        function setTokenChainFilter(chain) {
+            tokenChainFilter = chain;
+            lastServicesJson = '';  // 强制刷新
+            refresh();
+        }
         function renderServices(services) {
+            const newJson = JSON.stringify(services);
+            if (newJson === lastServicesJson) return;
+            lastServicesJson = newJson;
+
             const container = document.getElementById('services');
             container.innerHTML = services.map(s => {
                 const isOnline = s.status === 'online';
@@ -431,13 +442,22 @@ HTML_TEMPLATE = """
                     } else if (s.name === 'token_service') {
                         let items = s.recent.items || [];
                         let errors = s.recent.errors || [];
+                        // 根据选中的链过滤
+                        const filteredItems = tokenChainFilter === 'ALL' ? items : items.filter(r => r.chain === tokenChainFilter);
                         dataHtml += `<div class="data-section">
                             <div class="data-title" style="display:flex;justify-content:space-between;align-items:center">
-                                <span>🪙 最近代币</span>
+                                <div style="display:flex;align-items:center;gap:8px">
+                                    <span>🪙 最近代币</span>
+                                    <div style="display:flex;gap:2px">
+                                        <button onclick="setTokenChainFilter('ALL')" style="background:${tokenChainFilter==='ALL'?'#F0B90B':'#363c45'};color:${tokenChainFilter==='ALL'?'#000':'#eaecef'};border:none;padding:2px 6px;border-radius:3px;cursor:pointer;font-size:9px">全部</button>
+                                        <button onclick="setTokenChainFilter('BSC')" style="background:${tokenChainFilter==='BSC'?'#F0B90B':'#363c45'};color:${tokenChainFilter==='BSC'?'#000':'#eaecef'};border:none;padding:2px 6px;border-radius:3px;cursor:pointer;font-size:9px">BSC</button>
+                                        <button onclick="setTokenChainFilter('SOL')" style="background:${tokenChainFilter==='SOL'?'#9945FF':'#363c45'};color:#fff;border:none;padding:2px 6px;border-radius:3px;cursor:pointer;font-size:9px">SOL</button>
+                                    </div>
+                                </div>
                                 <button onclick="openInjectTokenModal()" style="background:#F0B90B;color:#000;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:10px">注入代币</button>
                             </div>`;
-                        if (items.length > 0) {
-                            dataHtml += `<div class="data-list">${items.map(r => {
+                        if (filteredItems.length > 0) {
+                            dataHtml += `<div class="data-list">${filteredItems.map(r => {
                                     const chainBadge = r.chain === 'SOL' ? '<span style="background:#9945FF;color:#fff;padding:1px 4px;border-radius:3px;font-size:9px;margin-right:4px">SOL</span>' : (r.chain === 'TEST' ? '<span style="background:#848e9c;color:#fff;padding:1px 4px;border-radius:3px;font-size:9px;margin-right:4px">TEST</span>' : '<span style="background:#F0B90B;color:#000;padding:1px 4px;border-radius:3px;font-size:9px;margin-right:4px">BSC</span>');
                                     return `<div class="data-item">${chainBadge}<span class="symbol">${r.symbol}</span> ${r.name} <span class="time">${formatTime(r.time/1000)} | MC:${r.marketCap} H:${r.holders}</span></div>`;
                                 }).join('')}</div>`;
