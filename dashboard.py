@@ -267,14 +267,20 @@ HTML_TEMPLATE = """
         }
 
         function copyText(text) {
-            navigator.clipboard.writeText(text).then(() => {
-                // 简单提示
-                const toast = document.createElement('div');
-                toast.textContent = '已复制: ' + (text.length > 20 ? text.slice(0,10) + '...' : text);
-                toast.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#0ecb81;color:#fff;padding:8px 16px;border-radius:4px;font-size:12px;z-index:9999';
-                document.body.appendChild(toast);
-                setTimeout(() => toast.remove(), 1500);
-            });
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            textarea.style.position = 'fixed';
+            textarea.style.opacity = '0';
+            document.body.appendChild(textarea);
+            textarea.select();
+            document.execCommand('copy');
+            document.body.removeChild(textarea);
+            // 提示
+            const toast = document.createElement('div');
+            toast.textContent = '已复制: ' + (text.length > 20 ? text.slice(0,10) + '...' : text);
+            toast.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#0ecb81;color:#fff;padding:8px 16px;border-radius:4px;font-size:12px;z-index:9999';
+            document.body.appendChild(toast);
+            setTimeout(() => toast.remove(), 1500);
         }
 
         let lastItemsJson = '';
