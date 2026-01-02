@@ -15,14 +15,7 @@ import requests
 # 确定正确的 Python 解释器
 def get_python_executable():
     """获取能正常运行服务的 Python 解释器"""
-    # 优先使用 /usr/bin/python3
-    if os.path.exists('/usr/bin/python3'):
-        return '/usr/bin/python3'
-    # 其次使用 PATH 中的 python3
-    python3_path = shutil.which('python3')
-    if python3_path:
-        return python3_path
-    # 最后使用当前解释器
+    # 优先使用当前解释器（支持 venv）
     return sys.executable
 
 PYTHON_EXE = get_python_executable()
