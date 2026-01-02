@@ -210,6 +210,7 @@ def recent():
             ref_content = item.get('contentOld') or ''
 
         items.append({
+            'id': f"{item.get('eventTime', '')}_{user.get('handle', '')}_{event_type}",
             'author': user.get('handle', 'Unknown'),
             'authorName': user.get('username', ''),
             'avatar': user.get('profilePic', ''),

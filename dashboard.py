@@ -266,19 +266,77 @@ HTML_TEMPLATE = """
             return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
         }
 
-        let lastRecentJson = '';
+        function copyText(text) {
+            navigator.clipboard.writeText(text).then(() => {
+                // 简单提示
+                const toast = document.createElement('div');
+                toast.textContent = '已复制: ' + (text.length > 20 ? text.slice(0,10) + '...' : text);
+                toast.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#0ecb81;color:#fff;padding:8px 16px;border-radius:4px;font-size:12px;z-index:9999';
+                document.body.appendChild(toast);
+                setTimeout(() => toast.remove(), 1500);
+            });
+        }
+
+        let lastItemsJson = '';
         let tokenChainFilter = 'ALL';
         function setTokenChainFilter(chain) {
             tokenChainFilter = chain;
-            lastRecentJson = '';  // 强制刷新
+            lastItemsJson = '';  // 强制刷新
             refresh();
         }
+
+        // 单独更新时间戳显示（不重新渲染DOM）
+        function updateTimestamps(services) {
+            services.forEach(s => {
+                const d = s.data || {};
+                if (s.name === 'news_service' || s.name === 'token_service') {
+                    const lastFetchEl = document.getElementById(`${s.name}-last-fetch`);
+                    const lastSuccessEl = document.getElementById(`${s.name}-last-success`);
+                    if (lastFetchEl) lastFetchEl.textContent = formatTime(d.last_fetch);
+                    if (lastSuccessEl) lastSuccessEl.textContent = formatTime(d.last_success);
+                }
+            });
+        }
+
+        // 提取稳定的列表数据用于比较（只比较id，忽略时间戳等动态字段）
+        function getStableItems(services) {
+            return services.map(s => {
+                if (!s.recent) return null;
+                const r = s.recent;
+                // 只提取 id 列表，忽略动态字段
+                if (s.name === 'news_service') {
+                    return { ids: (r.items || []).map(i => i.id), errCount: (r.errors || []).length };
+                } else if (s.name === 'token_service') {
+                    return { ids: (r.items || []).map(i => `${i.chain}:${i.address}`), errCount: (r.errors || []).length };
+                } else if (s.name === 'match_service') {
+                    // 只取 id/content 标识
+                    return {
+                        attemptIds: (r.attempts || []).map(a => `${a.author}:${a.time}`),
+                        matchIds: (r.matches || []).map(m => `${m.author}:${m.time}`),
+                        pendingIds: (r.pending || []).map(p => p.content),
+                        errCount: (r.errors || []).length
+                    };
+                } else if (s.name === 'tracker_service') {
+                    return { ids: (r.records || []).map(rec => rec.id || `${rec.author}:${rec.time}`) };
+                }
+                return null;
+            });
+        }
+
         function renderServices(services) {
-            // 只比较 recent 数据，忽略时间戳变化
-            const recentData = services.map(s => s.recent);
-            const newJson = JSON.stringify(recentData);
-            if (newJson === lastRecentJson) return;
-            lastRecentJson = newJson;
+            // 比较稳定的列表数据
+            const stableItems = getStableItems(services);
+            const newItemsJson = JSON.stringify(stableItems);
+            const needRenderLists = newItemsJson !== lastItemsJson;
+            if (needRenderLists) {
+                lastItemsJson = newItemsJson;
+            }
+
+            // 即使列表没变，也需要更新时间戳显示
+            updateTimestamps(services);
+
+            // 如果列表没变，不重新渲染DOM
+            if (!needRenderLists) return;
 
             const container = document.getElementById('services');
             container.innerHTML = services.map(s => {
@@ -292,13 +350,13 @@ HTML_TEMPLATE = """
                 let statsHtml = '';
                 if (s.name === 'news_service') {
                     statsHtml = `<div class="stat-item">推文: <span class="stat-value">${d.total_news || 0}</span></div>
-                                <div class="stat-item">最后获取: <span class="stat-value">${formatTime(d.last_fetch)}</span></div>
-                                <div class="stat-item">最后成功: <span class="stat-value">${formatTime(d.last_success)}</span></div>
+                                <div class="stat-item">最后获取: <span class="stat-value" id="news_service-last-fetch">${formatTime(d.last_fetch)}</span></div>
+                                <div class="stat-item">最后成功: <span class="stat-value" id="news_service-last-success">${formatTime(d.last_success)}</span></div>
                                 <div class="stat-item">错误: <span class="stat-value ${hasErrors?'error':''}">${d.errors || 0}</span></div>`;
                 } else if (s.name === 'token_service') {
                     statsHtml = `<div class="stat-item">代币: <span class="stat-value">${d.total_tokens || 0}</span></div>
-                                <div class="stat-item">最后获取: <span class="stat-value">${formatTime(d.last_fetch)}</span></div>
-                                <div class="stat-item">最后成功: <span class="stat-value">${formatTime(d.last_success)}</span></div>
+                                <div class="stat-item">最后获取: <span class="stat-value" id="token_service-last-fetch">${formatTime(d.last_fetch)}</span></div>
+                                <div class="stat-item">最后成功: <span class="stat-value" id="token_service-last-success">${formatTime(d.last_success)}</span></div>
                                 <div class="stat-item">错误: <span class="stat-value ${hasErrors?'error':''}">${d.errors || 0}</span></div>`;
                 } else if (s.name === 'match_service') {
                     statsHtml = `<div class="stat-item">匹配: <span class="stat-value">${d.total_matches || 0}</span></div>
@@ -465,7 +523,9 @@ HTML_TEMPLATE = """
                         if (filteredItems.length > 0) {
                             dataHtml += `<div class="data-list">${filteredItems.map(r => {
                                     const chainBadge = r.chain === 'SOL' ? '<span style="background:#9945FF;color:#fff;padding:1px 4px;border-radius:3px;font-size:9px;margin-right:4px">SOL</span>' : (r.chain === 'TEST' ? '<span style="background:#848e9c;color:#fff;padding:1px 4px;border-radius:3px;font-size:9px;margin-right:4px">TEST</span>' : '<span style="background:#F0B90B;color:#000;padding:1px 4px;border-radius:3px;font-size:9px;margin-right:4px">BSC</span>');
-                                    return `<div class="data-item">${chainBadge}<span class="symbol">${r.symbol}</span> ${r.name} <span class="time">${formatTime(r.time/1000)} | MC:${r.marketCap} H:${r.holders}</span></div>`;
+                                    const shortCa = r.address ? (r.address.length > 16 ? r.address.slice(0,8) + '...' + r.address.slice(-6) : r.address) : '';
+                                    const caHtml = shortCa ? `<span style="color:#848e9c;font-size:9px;font-family:monospace;margin-left:6px;cursor:pointer" title="点击复制: ${r.address}" onclick="copyText('${r.address}')">${shortCa}</span>` : '';
+                                    return `<div class="data-item">${chainBadge}<span class="symbol" style="cursor:pointer" title="点击复制" onclick="copyText('${r.symbol}')">${r.symbol}</span> ${r.name}${caHtml} <span class="time">${formatTime(r.time/1000)} | MC:${r.marketCap} H:${r.holders}</span></div>`;
                                 }).join('')}</div>`;
                         } else {
                             dataHtml += `<div class="no-data" style="padding:10px;color:#848e9c">暂无代币</div>`;

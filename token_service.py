@@ -295,6 +295,7 @@ def recent():
     items = []
     for item in recent_items:
         items.append({
+            'address': item.get('contractAddress') or item.get('tokenAddress', ''),
             'symbol': item.get('symbol') or item.get('tokenSymbol', 'Unknown'),
             'name': item.get('name') or item.get('tokenName', ''),
             'chain': item.get('chain', 'BSC'),
