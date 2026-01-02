@@ -23,6 +23,67 @@ SEEN_EVENTS_FILE = os.path.join(os.path.dirname(__file__), 'seen_events.json')
 app = Flask(__name__)
 
 
+def search_binance_tokens(keyword):
+    """
+    使用 Binance API 搜索优质代币
+    筛选条件: 市值 > 200k, 流动性 > 50k, 存在时间 > 1天
+    """
+    try:
+        url = f"{config.BINANCE_SEARCH_URL}?keyword={requests.utils.quote(keyword)}&chainIds={config.BINANCE_SEARCH_CHAINS}"
+        resp = requests.get(
+            url,
+            headers=config.HEADERS,
+            cookies=config.COOKIES,
+            proxies=config.PROXIES,
+            timeout=10
+        )
+        if resp.status_code != 200:
+            print(f"[搜索] 失败: HTTP {resp.status_code}", flush=True)
+            return []
+
+        data = resp.json()
+        if data.get('code') != '000000':
+            print(f"[搜索] API错误: {data.get('message')}", flush=True)
+            return []
+
+        tokens = data.get('data', []) or []
+
+        # 筛选优质代币
+        quality_tokens = []
+        now = time.time() * 1000  # 毫秒
+        for token in tokens:
+            mcap = float(token.get('marketCap', 0) or 0)
+            liquidity = float(token.get('liquidity', 0) or 0)
+            create_time = token.get('createTime', 0) or 0
+            age_ms = now - create_time if create_time else 0
+            age_seconds = age_ms / 1000
+
+            # 链ID转换
+            chain_id = token.get('chainId', '')
+            chain_name = 'SOL' if chain_id == 'CT_501' else 'BSC' if chain_id == '56' else 'BASE' if chain_id == '8453' else chain_id
+
+            if (mcap >= config.SEARCH_MIN_MCAP and
+                liquidity >= config.SEARCH_MIN_LIQUIDITY and
+                age_seconds >= config.SEARCH_MIN_AGE_SECONDS):
+                quality_tokens.append({
+                    'address': token.get('contractAddress', ''),
+                    'symbol': token.get('symbol', ''),
+                    'name': token.get('name', ''),
+                    'chain': chain_name,
+                    'marketCap': mcap,
+                    'liquidity': liquidity,
+                    'age_days': round(age_seconds / 86400, 1),
+                    'price': token.get('price', 0),
+                    'source': 'binance_search'
+                })
+
+        print(f"[搜索] '{keyword}': 找到 {len(tokens)} 个, 优质 {len(quality_tokens)} 个", flush=True)
+        return quality_tokens
+    except Exception as e:
+        print(f"[搜索] 异常: {e}", flush=True)
+        return []
+
+
 def load_seen_events():
     """从文件加载已处理的推文 ID"""
     try:
@@ -730,23 +791,37 @@ def fetch_news_stream():
                             print(f"[过滤] @{author} 无法提取关键词", flush=True)
                             continue
 
-                        # 立即匹配当前缓存的代币
+                        # 立即匹配当前缓存的代币（新币）
                         matched_tokens, tokens_in_window, window_token_names = match_tokens(news_time, keywords)
 
-                        # 记录撮合尝试
-                        log_attempt(author, content, keywords, tokens_in_window, len(matched_tokens), window_token_names)
+                        # 同时搜索 Binance 优质代币（老币）
+                        search_tokens = []
+                        for kw in keywords[:3]:  # 只搜前3个关键词
+                            search_result = search_binance_tokens(kw)
+                            for token in search_result:
+                                if not any(t.get('address') == token['address'] for t in search_tokens):
+                                    search_tokens.append(token)
 
-                        if matched_tokens:
+                        # 记录撮合尝试
+                        total_matched = len(matched_tokens) + len(search_tokens)
+                        log_attempt(author, content, keywords, tokens_in_window, total_matched, window_token_names)
+
+                        if matched_tokens or search_tokens:
                             stats['total_matches'] += 1
                             stats['last_match'] = time.time()
-                            log_match(author, content, matched_tokens)
 
                             api_tag = "[Gemini+图片]" if api_used == 'gemini' else "[DeepSeek]"
                             print(f"\n[匹配] {api_tag} @{author}: {content[:50]}...", flush=True)
                             print(f"  关键词: {keywords}", flush=True)
-                            print(f"  匹配代币: {len(matched_tokens)} 个", flush=True)
+                            if matched_tokens:
+                                log_match(author, content, matched_tokens)
+                                print(f"  新币匹配: {len(matched_tokens)} 个", flush=True)
+                            if search_tokens:
+                                print(f"  搜索优质: {len(search_tokens)} 个 ({', '.join(t['symbol'] for t in search_tokens[:3])})", flush=True)
 
-                            send_to_tracker(news_data, keywords, matched_tokens)
+                            # 合并发送到 tracker（新币优先）
+                            all_tokens = matched_tokens + [{'tokenAddress': t['address'], 'tokenSymbol': t['symbol'], 'tokenName': t['name'], 'chain': t['chain'], 'marketCap': t['marketCap'], 'liquidity': t.get('liquidity', 0), 'source': 'binance_search'} for t in search_tokens]
+                            send_to_tracker(news_data, keywords, all_tokens)
 
                         # 检查是否在窗口期内，如果是则加入持续检测队列
                         window_end = news_time * 1000 + config.TIME_WINDOW_MS
@@ -821,6 +896,29 @@ def test_extract_keywords():
         'text': text,
         'keywords': keywords,
         'api': api_used
+    })
+
+
+@app.route('/search', methods=['POST'])
+def test_search():
+    """测试 Binance 代币搜索"""
+    from flask import request
+    data = request.get_json()
+    keyword = data.get('keyword', '')
+
+    if not keyword:
+        return jsonify({'error': '关键词不能为空'}), 400
+
+    tokens = search_binance_tokens(keyword)
+    return jsonify({
+        'keyword': keyword,
+        'count': len(tokens),
+        'tokens': tokens,
+        'filter': {
+            'min_mcap': config.SEARCH_MIN_MCAP,
+            'min_liquidity': config.SEARCH_MIN_LIQUIDITY,
+            'min_age_days': config.SEARCH_MIN_AGE_SECONDS / 86400
+        }
     })
 
 
