@@ -560,7 +560,7 @@ HTML_TEMPLATE = """
                     scrollPositions[i] = el.scrollTop;
                 });
 
-                const statusResp = await fetch('/api/status');
+                const statusResp = await fetch('api/status');
                 const statusData = await statusResp.json();
                 renderServices(statusData);
 
@@ -569,7 +569,7 @@ HTML_TEMPLATE = """
                     if (scrollPositions[i]) el.scrollTop = scrollPositions[i];
                 });
 
-                const matchResp = await fetch('/api/matches');
+                const matchResp = await fetch('api/matches');
                 const matchData = await matchResp.json();
                 renderMatches(matchData);
 
@@ -604,7 +604,7 @@ HTML_TEMPLATE = """
             const keywords = keywordsStr.split(',').map(k => k.trim()).filter(k => k);
 
             try {
-                const resp = await fetch('/api/import', {
+                const resp = await fetch('api/import', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({
@@ -679,7 +679,7 @@ HTML_TEMPLATE = """
                 if (injectImageData) {
                     payload.image = injectImageData;
                 }
-                const resp = await fetch('/api/inject', {
+                const resp = await fetch('api/inject', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify(payload)
@@ -732,7 +732,7 @@ HTML_TEMPLATE = """
             btn.disabled = true;
 
             try {
-                const resp = await fetch('/api/extract', {
+                const resp = await fetch('api/extract', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({ text: content })
@@ -764,7 +764,7 @@ HTML_TEMPLATE = """
         // 启动服务
         async function startService(serviceName) {
             try {
-                const resp = await fetch('/api/start_service', {
+                const resp = await fetch('api/start_service', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({ service: serviceName })
