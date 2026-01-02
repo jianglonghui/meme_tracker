@@ -7,6 +7,7 @@ import requests
 import time
 import hashlib
 import os
+from collections import deque
 from flask import Flask, render_template_string, jsonify, request, Response, send_file
 import config
 
@@ -15,6 +16,22 @@ CACHE_DIR = os.path.join(os.path.dirname(__file__), 'media_cache')
 os.makedirs(CACHE_DIR, exist_ok=True)
 
 app = Flask(__name__)
+
+# 服务状态历史记录 (最近60个点，每5秒一个点 = 5分钟)
+MAX_HISTORY = 60
+status_history = {
+    'news_service': deque(maxlen=MAX_HISTORY),
+    'token_service': deque(maxlen=MAX_HISTORY),
+    'tracker_service': deque(maxlen=MAX_HISTORY),
+    'match_service': deque(maxlen=MAX_HISTORY),
+}
+# 上一次的 errors 计数
+last_errors = {
+    'news_service': 0,
+    'token_service': 0,
+    'tracker_service': 0,
+    'match_service': 0,
+}
 
 def get_services():
     """动态获取服务列表，确保使用正确的端口"""
@@ -59,6 +76,14 @@ HTML_TEMPLATE = """
         .stat-item { display: flex; gap: 5px; }
         .stat-value { color: #eaecef; font-weight: bold; }
         .stat-value.error { color: #f6465d; }
+
+        .timeline { display: flex; gap: 2px; margin-bottom: 10px; align-items: center; }
+        .timeline-label { font-size: 10px; color: #848e9c; margin-right: 8px; white-space: nowrap; }
+        .timeline-bars { display: flex; gap: 1px; flex: 1; }
+        .timeline-bar { width: 4px; height: 16px; border-radius: 1px; background: #2b3139; }
+        .timeline-bar.online { background: #0ecb81; }
+        .timeline-bar.offline { background: #f6465d; }
+        .timeline-bar:hover { opacity: 0.7; }
 
         .data-section { margin-top: 10px; }
         .data-title { font-size: 12px; color: #f0b90b; margin-bottom: 5px; cursor: pointer; }
@@ -122,9 +147,80 @@ HTML_TEMPLATE = """
             <div class="service-card"><div class="service-name">加载中...</div></div>
         </div>
 
-        <h2>数据库匹配记录</h2>
+        <h2 style="display:flex;justify-content:space-between;align-items:center">
+            数据库匹配记录
+            <button onclick="openImportModal()" style="background:#F0B90B;color:#000;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;font-size:12px">+ 导入推文</button>
+        </h2>
         <div class="matches" id="matches">
             <div class="no-data">加载中...</div>
+        </div>
+
+        <!-- 导入推文弹窗 -->
+        <div id="importModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:1000;justify-content:center;align-items:center">
+            <div style="background:#1e2329;padding:24px;border-radius:8px;width:500px;max-width:90%">
+                <h3 style="margin:0 0 16px 0;color:#eaecef">导入推文</h3>
+                <div style="margin-bottom:12px">
+                    <label style="display:block;color:#848e9c;margin-bottom:4px;font-size:12px">推文内容</label>
+                    <textarea id="importContent" rows="4" style="width:100%;background:#2b3139;border:1px solid #363c45;border-radius:4px;padding:8px;color:#eaecef;resize:vertical" placeholder="输入推文内容..."></textarea>
+                </div>
+                <div style="margin-bottom:12px">
+                    <label style="display:block;color:#848e9c;margin-bottom:4px;font-size:12px">关键词（逗号分隔）</label>
+                    <input id="importKeywords" type="text" style="width:100%;background:#2b3139;border:1px solid #363c45;border-radius:4px;padding:8px;color:#eaecef" placeholder="关键词1, 关键词2, 关键词3">
+                </div>
+                <div style="margin-bottom:16px">
+                    <label style="display:block;color:#848e9c;margin-bottom:4px;font-size:12px">最佳代币</label>
+                    <input id="importToken" type="text" style="width:100%;background:#2b3139;border:1px solid #363c45;border-radius:4px;padding:8px;color:#eaecef" placeholder="代币名称">
+                </div>
+                <div style="display:flex;gap:12px;justify-content:flex-end">
+                    <button onclick="closeImportModal()" style="background:#363c45;color:#eaecef;border:none;padding:8px 16px;border-radius:4px;cursor:pointer">取消</button>
+                    <button onclick="submitImport()" style="background:#F0B90B;color:#000;border:none;padding:8px 16px;border-radius:4px;cursor:pointer">导入</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 注入推文弹窗 -->
+        <div id="injectModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:1000;justify-content:center;align-items:center">
+            <div style="background:#1e2329;padding:24px;border-radius:8px;width:500px;max-width:90%">
+                <h3 style="margin:0 0 16px 0;color:#eaecef">注入推文</h3>
+                <div style="margin-bottom:12px">
+                    <label style="display:block;color:#848e9c;margin-bottom:4px;font-size:12px">推文内容</label>
+                    <textarea id="injectContent" rows="4" style="width:100%;background:#2b3139;border:1px solid #363c45;border-radius:4px;padding:8px;color:#eaecef;resize:vertical" placeholder="输入推文内容..."></textarea>
+                </div>
+                <div style="margin-bottom:12px">
+                    <label style="display:block;color:#848e9c;margin-bottom:4px;font-size:12px">图片（可选）</label>
+                    <input type="file" id="injectImage" accept="image/*" style="display:none" onchange="previewInjectImage(this)">
+                    <div id="injectImagePreview" style="display:none;margin-bottom:8px;position:relative">
+                        <img id="injectImageImg" style="max-width:200px;max-height:150px;border-radius:4px">
+                        <button onclick="clearInjectImage()" style="position:absolute;top:4px;right:4px;background:#f6465d;color:#fff;border:none;width:20px;height:20px;border-radius:50%;cursor:pointer;font-size:12px">×</button>
+                    </div>
+                    <button onclick="document.getElementById('injectImage').click()" style="background:#2b3139;color:#848e9c;border:1px solid #363c45;padding:6px 12px;border-radius:4px;cursor:pointer;font-size:12px">+ 添加图片</button>
+                </div>
+                <div id="injectResult" style="display:none;margin-bottom:12px;padding:12px;background:#2b3139;border-radius:4px">
+                    <div id="injectMsg" style="color:#eaecef"></div>
+                </div>
+                <div style="display:flex;gap:12px;justify-content:flex-end">
+                    <button onclick="closeInjectModal()" style="background:#363c45;color:#eaecef;border:none;padding:8px 16px;border-radius:4px;cursor:pointer">关闭</button>
+                    <button id="injectBtn" onclick="submitInject()" style="background:#F0B90B;color:#000;border:none;padding:8px 16px;border-radius:4px;cursor:pointer">注入</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 测试撮合弹窗 -->
+        <div id="testMatchModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:1000;justify-content:center;align-items:center">
+            <div style="background:#1e2329;padding:24px;border-radius:8px;width:500px;max-width:90%">
+                <h3 style="margin:0 0 16px 0;color:#eaecef">测试撮合</h3>
+                <div style="margin-bottom:12px">
+                    <label style="display:block;color:#848e9c;margin-bottom:4px;font-size:12px">推文内容</label>
+                    <textarea id="testMatchContent" rows="4" style="width:100%;background:#2b3139;border:1px solid #363c45;border-radius:4px;padding:8px;color:#eaecef;resize:vertical" placeholder="输入推文内容..."></textarea>
+                </div>
+                <div id="testMatchResult" style="display:none;margin-bottom:12px;padding:12px;background:#2b3139;border-radius:4px">
+                    <div id="testMatchKeywords" style="color:#eaecef"></div>
+                </div>
+                <div style="display:flex;gap:12px;justify-content:flex-end">
+                    <button onclick="closeTestMatchModal()" style="background:#363c45;color:#eaecef;border:none;padding:8px 16px;border-radius:4px;cursor:pointer">关闭</button>
+                    <button id="testMatchBtn" onclick="submitTestMatch()" style="background:#F0B90B;color:#000;border:none;padding:8px 16px;border-radius:4px;cursor:pointer">提取关键词</button>
+                </div>
+            </div>
         </div>
 
         <div class="refresh-info">每 5 秒自动刷新 | <span id="last-update">-</span></div>
@@ -177,11 +273,19 @@ HTML_TEMPLATE = """
                     if (s.name === 'news_service') {
                         let items = s.recent.items || [];
                         let errors = s.recent.errors || [];
+                        // 始终显示标题和注入按钮
+                        dataHtml += `<div class="data-section">
+                            <div class="data-title" style="display:flex;justify-content:space-between;align-items:center">
+                                <span>📰 最近推文</span>
+                                <button onclick="openInjectModal()" style="background:#F0B90B;color:#000;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:10px">注入推文</button>
+                            </div>`;
                         if (items.length > 0) {
-                            dataHtml += `<div class="data-section">
-                                <div class="data-title">📰 最近推文</div>
-                                <div class="data-list">${items.map(r => {
-                                    const proxyUrl = (url) => url ? '/proxy?url=' + encodeURIComponent(url) : '';
+                            dataHtml += `<div class="data-list">${items.map(r => {
+                                    const proxyUrl = (url) => {
+                                        if (!url) return '';
+                                        if (url.startsWith('/local_image/')) return url;
+                                        return '/proxy?url=' + encodeURIComponent(url);
+                                    };
 
                                     // 头像
                                     const avatarHtml = r.avatar
@@ -239,14 +343,16 @@ HTML_TEMPLATE = """
                                             </div>
                                             <span class="time">${formatTime(r.time)}</span>
                                         </div>
-                                        <div class="content">${r.content || (r.type === 'follow' ? '关注了 @' + (r.refAuthor || '') + (r.refAuthorName ? ' (' + r.refAuthorName + ')' : '') : '(无内容)')}</div>
+                                        <div class="content">${r.content || (r.type === 'follow' ? '关注了 @' + (r.refAuthor || '') + (r.refAuthorName ? ' (' + r.refAuthorName + ')' : '') : (r.images && r.images.length > 0 ? '' : '(无内容)'))}</div>
                                         ${imagesHtml}
                                         ${videosHtml}
                                         ${refHtml}
                                     </div>`;
-                                }).join('')}</div>
-                            </div>`;
+                                }).join('')}</div>`;
+                        } else {
+                            dataHtml += `<div class="no-data" style="padding:10px;color:#848e9c">暂无推文</div>`;
                         }
+                        dataHtml += `</div>`;
                         if (errors.length > 0) {
                             const errId = 'err-news-' + Date.now();
                             dataHtml += `<div class="data-section error-section">
@@ -265,9 +371,10 @@ HTML_TEMPLATE = """
                         if (items.length > 0) {
                             dataHtml += `<div class="data-section">
                                 <div class="data-title">🪙 最近代币</div>
-                                <div class="data-list">${items.map(r =>
-                                    `<div class="data-item"><span class="symbol">${r.symbol}</span> ${r.name} <span class="time">${formatTime(r.time/1000)} | MC:${r.marketCap} H:${r.holders}</span></div>`
-                                ).join('')}</div>
+                                <div class="data-list">${items.map(r => {
+                                    const chainBadge = r.chain === 'SOL' ? '<span style="background:#9945FF;color:#fff;padding:1px 4px;border-radius:3px;font-size:9px;margin-right:4px">SOL</span>' : '<span style="background:#F0B90B;color:#000;padding:1px 4px;border-radius:3px;font-size:9px;margin-right:4px">BSC</span>';
+                                    return `<div class="data-item">${chainBadge}<span class="symbol">${r.symbol}</span> ${r.name} <span class="time">${formatTime(r.time/1000)} | MC:${r.marketCap} H:${r.holders}</span></div>`;
+                                }).join('')}</div>
                             </div>`;
                         }
                         if (errors.length > 0) {
@@ -286,22 +393,44 @@ HTML_TEMPLATE = """
                         let attemptList = s.recent.attempts || [];
                         let matchList = s.recent.matches || [];
                         let errorList = s.recent.errors || [];
-                        if (attemptList.length > 0) {
-                            dataHtml += `<div class="data-section">
-                                <div class="data-title">🔍 撮合尝试</div>
-                                <div class="data-list">${attemptList.map(r => {
-                                    let matchStatus = r.matched > 0 ? `<span class="symbol">✓ ${r.matched}个匹配</span>` : '<span style="color:#848e9c">无匹配</span>';
-                                    let keywordsStr = r.keywords && r.keywords.length > 0 ? r.keywords.join(', ') : '(无关键词)';
-                                    let windowTokensStr = r.window_tokens && r.window_tokens.length > 0 ? r.window_tokens.join(', ') : '(无)';
-                                    return `<div class="data-item">
-                                        <div><span class="author">@${r.author}</span> ${matchStatus} <span class="time">${formatTime(r.time)}</span></div>
-                                        <div class="content">${r.content}</div>
-                                        <div style="color:#848e9c;font-size:10px">关键词: ${keywordsStr}</div>
-                                        <div style="color:#848e9c;font-size:10px">窗口代币(${r.tokens_in_window}): ${windowTokensStr}</div>
-                                    </div>`;
-                                }).join('')}</div>
+                        let pendingList = s.recent.pending || [];
+                        // 构建 pending 查找表
+                        const pendingMap = {};
+                        pendingList.forEach(p => { pendingMap[p.content] = p; });
+                        // 测试撮合按钮
+                        dataHtml += `<div class="data-section">
+                            <div class="data-title" style="display:flex;justify-content:space-between;align-items:center">
+                                <span>🔍 撮合尝试</span>
+                                <button onclick="openTestMatchModal()" style="background:#F0B90B;color:#000;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:10px">测试撮合</button>
                             </div>`;
+                        if (attemptList.length > 0) {
+                            dataHtml += `<div class="data-list">${attemptList.map(r => {
+                                // 检测状态
+                                const pendingInfo = pendingMap[r.content];
+                                let statusBadge;
+                                if (pendingInfo) {
+                                    const now = Math.floor(Date.now() / 1000);
+                                    const remaining = Math.max(0, pendingInfo.expire_time - now);
+                                    const mins = Math.floor(remaining / 60);
+                                    const secs = remaining % 60;
+                                    statusBadge = `<span style="background:#F0B90B;color:#000;padding:2px 6px;border-radius:4px;font-size:10px;margin-left:6px">检测中 ${mins}:${secs.toString().padStart(2,'0')}</span>`;
+                                } else {
+                                    statusBadge = `<span style="background:#02c076;color:#fff;padding:2px 6px;border-radius:4px;font-size:10px;margin-left:6px">已完成</span>`;
+                                }
+                                let matchStatus = r.matched > 0 ? `<span class="symbol">✓ ${r.matched}个匹配</span>` : '<span style="color:#848e9c">无匹配</span>';
+                                let keywordsStr = r.keywords && r.keywords.length > 0 ? r.keywords.join(', ') : '(无关键词)';
+                                let windowTokensStr = r.window_tokens && r.window_tokens.length > 0 ? r.window_tokens.join(', ') : '(无)';
+                                return `<div class="data-item">
+                                    <div><span class="author">@${r.author}</span> ${matchStatus} ${statusBadge} <span class="time">${formatTime(r.time)}</span></div>
+                                    <div class="content">${r.content}</div>
+                                    <div style="color:#848e9c;font-size:10px">关键词: ${keywordsStr}</div>
+                                    <div style="color:#848e9c;font-size:10px">窗口代币(${r.tokens_in_window}): ${windowTokensStr}</div>
+                                </div>`;
+                            }).join('')}</div>`;
+                        } else {
+                            dataHtml += `<div class="no-data" style="padding:10px;color:#848e9c">暂无撮合尝试</div>`;
                         }
+                        dataHtml += `</div>`;
                         if (matchList.length > 0) {
                             dataHtml += `<div class="data-section">
                                 <div class="data-title">🎯 成功匹配</div>
@@ -325,6 +454,24 @@ HTML_TEMPLATE = """
                     }
                 }
 
+                // 时间线
+                let timelineHtml = '';
+                if (s.history && s.history.length > 0) {
+                    const bars = s.history.map(h =>
+                        `<div class="timeline-bar ${h ? 'online' : 'offline'}" title="${h ? '正常' : '异常'}"></div>`
+                    ).join('');
+                    timelineHtml = `<div class="timeline">
+                        <span class="timeline-label">5分钟</span>
+                        <div class="timeline-bars">${bars}</div>
+                        <span class="timeline-label">现在</span>
+                    </div>`;
+                }
+
+                // 离线时显示启动按钮
+                const startBtn = !isOnline
+                    ? `<button onclick="startService('${s.name}')" style="background:#0ecb81;color:#fff;border:none;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:11px;margin-left:8px">启动</button>`
+                    : '';
+
                 return `<div class="service-card ${statusClass}">
                     <div class="service-header">
                         <div>
@@ -334,8 +481,10 @@ HTML_TEMPLATE = """
                         <div class="service-status">
                             <div class="status-dot ${statusClass}"></div>
                             <span>${statusText}</span>
+                            ${startBtn}
                         </div>
                     </div>
+                    ${timelineHtml}
                     <div class="service-stats">${statsHtml}</div>
                     ${dataHtml}
                 </div>`;
@@ -349,24 +498,76 @@ HTML_TEMPLATE = """
                 return;
             }
 
+            const proxyUrl = (url) => {
+                if (!url) return '';
+                if (url.startsWith('/local_image/')) return url;
+                return '/proxy?url=' + encodeURIComponent(url);
+            };
+
             container.innerHTML = data.map(m => {
-                const tokensHtml = m.best_tokens && m.best_tokens.length > 0
-                    ? m.best_tokens.map(t => `<span class="token-badge">${t.symbol}</span>`).join('')
-                    : '<span style="color:#848e9c">等待追踪...</span>';
+                // 最佳代币
+                const bestTokensHtml = m.best_tokens && m.best_tokens.length > 0
+                    ? m.best_tokens.map(t => `<span class="token-badge">${t.token_symbol}</span>`).join('')
+                    : (m.matched_tokens && m.matched_tokens.length > 0
+                        ? m.matched_tokens.map(t => `<span class="token-badge" style="background:#848e9c">${t.token_symbol}</span>`).join('')
+                        : '<span style="color:#848e9c">等待追踪...</span>');
+
+                // 头像
+                const avatarHtml = m.avatar
+                    ? `<img class="avatar" src="${proxyUrl(m.avatar)}" style="width:40px;height:40px;border-radius:50%;margin-right:10px" onerror="this.style.display='none'">`
+                    : '<div style="width:40px;height:40px;border-radius:50%;background:#2b3139;margin-right:10px"></div>';
+
+                // 图片
+                let imagesHtml = '';
+                if (m.images && m.images.length > 0) {
+                    imagesHtml = '<div style="display:flex;flex-wrap:wrap;gap:6px;margin:8px 0">' +
+                        m.images.map(url => `<img src="${proxyUrl(url)}" style="max-width:150px;max-height:150px;border-radius:6px;cursor:pointer" onclick="window.open('${proxyUrl(url)}')" onerror="this.style.display='none'">`).join('') +
+                        '</div>';
+                }
+
+                // 关键词
+                const keywordsHtml = m.keywords && m.keywords.length > 0
+                    ? `<div style="font-size:11px;color:#848e9c;margin-top:6px">关键词: ${m.keywords.join(', ')}</div>`
+                    : '';
 
                 return `<div class="match-item">
-                    <div class="match-author">@${m.author || 'Unknown'}</div>
-                    <div class="match-content">${m.content || ''}</div>
-                    <div class="match-tokens">${tokensHtml}</div>
+                    <div style="display:flex;align-items:flex-start">
+                        ${avatarHtml}
+                        <div style="flex:1">
+                            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+                                <span class="match-author">@${m.author || 'Unknown'}</span>
+                                <span style="color:#848e9c;font-size:12px">${m.authorName || ''}</span>
+                                <span style="color:#848e9c;font-size:11px">${formatTime(m.time)}</span>
+                            </div>
+                            <div class="match-content">${m.content || ''}</div>
+                            ${imagesHtml}
+                            ${keywordsHtml}
+                        </div>
+                    </div>
+                    <div style="margin-top:10px;padding-top:10px;border-top:1px solid #2b3139">
+                        <span style="color:#f0b90b;font-size:12px;margin-right:8px">🎯 最佳代币:</span>
+                        <div class="match-tokens" style="display:inline">${bestTokensHtml}</div>
+                    </div>
                 </div>`;
             }).join('');
         }
 
         async function refresh() {
             try {
+                // 保存所有 data-list 的滚动位置
+                const scrollPositions = {};
+                document.querySelectorAll('.data-list').forEach((el, i) => {
+                    scrollPositions[i] = el.scrollTop;
+                });
+
                 const statusResp = await fetch('/api/status');
                 const statusData = await statusResp.json();
                 renderServices(statusData);
+
+                // 恢复滚动位置
+                document.querySelectorAll('.data-list').forEach((el, i) => {
+                    if (scrollPositions[i]) el.scrollTop = scrollPositions[i];
+                });
 
                 const matchResp = await fetch('/api/matches');
                 const matchData = await matchResp.json();
@@ -375,6 +576,208 @@ HTML_TEMPLATE = """
                 document.getElementById('last-update').textContent = new Date().toLocaleTimeString('zh-CN');
             } catch (e) {
                 console.error('Refresh error:', e);
+            }
+        }
+
+        // 导入推文弹窗
+        function openImportModal() {
+            document.getElementById('importModal').style.display = 'flex';
+            document.getElementById('importContent').value = '';
+            document.getElementById('importKeywords').value = '';
+            document.getElementById('importToken').value = '';
+        }
+
+        function closeImportModal() {
+            document.getElementById('importModal').style.display = 'none';
+        }
+
+        async function submitImport() {
+            const content = document.getElementById('importContent').value.trim();
+            const keywordsStr = document.getElementById('importKeywords').value.trim();
+            const token = document.getElementById('importToken').value.trim();
+
+            if (!content || !keywordsStr || !token) {
+                alert('请填写所有字段');
+                return;
+            }
+
+            const keywords = keywordsStr.split(',').map(k => k.trim()).filter(k => k);
+
+            try {
+                const resp = await fetch('/api/import', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        tweet_content: content,
+                        keywords: keywords,
+                        best_token: token
+                    })
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    closeImportModal();
+                    refresh();
+                } else {
+                    alert('导入失败: ' + (data.error || '未知错误'));
+                }
+            } catch (e) {
+                alert('导入失败: ' + e.message);
+            }
+        }
+
+        // 点击弹窗外部关闭
+        document.getElementById('importModal').addEventListener('click', function(e) {
+            if (e.target === this) closeImportModal();
+        });
+
+        // 注入推文弹窗
+        let injectImageData = null;
+
+        function openInjectModal() {
+            document.getElementById('injectModal').style.display = 'flex';
+            document.getElementById('injectContent').value = '';
+            document.getElementById('injectResult').style.display = 'none';
+            document.getElementById('injectBtn').textContent = '注入';
+            clearInjectImage();
+        }
+
+        function closeInjectModal() {
+            document.getElementById('injectModal').style.display = 'none';
+        }
+
+        function previewInjectImage(input) {
+            if (input.files && input.files[0]) {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    injectImageData = e.target.result;
+                    document.getElementById('injectImageImg').src = injectImageData;
+                    document.getElementById('injectImagePreview').style.display = 'block';
+                };
+                reader.readAsDataURL(input.files[0]);
+            }
+        }
+
+        function clearInjectImage() {
+            injectImageData = null;
+            document.getElementById('injectImage').value = '';
+            document.getElementById('injectImagePreview').style.display = 'none';
+        }
+
+        async function submitInject() {
+            const content = document.getElementById('injectContent').value.trim();
+            if (!content && !injectImageData) {
+                alert('请输入推文内容或上传图片');
+                return;
+            }
+
+            const btn = document.getElementById('injectBtn');
+            btn.textContent = '注入中...';
+            btn.disabled = true;
+
+            try {
+                const payload = { content: content };
+                if (injectImageData) {
+                    payload.image = injectImageData;
+                }
+                const resp = await fetch('/api/inject', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(payload)
+                });
+                const data = await resp.json();
+
+                document.getElementById('injectResult').style.display = 'block';
+                if (data.success) {
+                    document.getElementById('injectMsg').innerHTML =
+                        '<span style="color:#02c076">已注入推文流，等待撮合...</span>' +
+                        '<br><span style="color:#848e9c;font-size:11px;margin-top:8px;display:block">查看 match_service 状态获取结果</span>';
+                    setTimeout(() => { refresh(); }, 2000);
+                } else {
+                    document.getElementById('injectMsg').innerHTML = '<span style="color:#f6465d">注入失败: ' + (data.error || '未知错误') + '</span>';
+                }
+            } catch (e) {
+                document.getElementById('injectResult').style.display = 'block';
+                document.getElementById('injectMsg').innerHTML = '<span style="color:#f6465d">错误: ' + e.message + '</span>';
+            }
+
+            btn.textContent = '再次注入';
+            btn.disabled = false;
+        }
+
+        document.getElementById('injectModal').addEventListener('click', function(e) {
+            if (e.target === this) closeInjectModal();
+        });
+
+        // 测试撮合弹窗
+        function openTestMatchModal() {
+            document.getElementById('testMatchModal').style.display = 'flex';
+            document.getElementById('testMatchContent').value = '';
+            document.getElementById('testMatchResult').style.display = 'none';
+            document.getElementById('testMatchBtn').textContent = '提取关键词';
+        }
+
+        function closeTestMatchModal() {
+            document.getElementById('testMatchModal').style.display = 'none';
+        }
+
+        async function submitTestMatch() {
+            const content = document.getElementById('testMatchContent').value.trim();
+            if (!content) {
+                alert('请输入推文内容');
+                return;
+            }
+
+            const btn = document.getElementById('testMatchBtn');
+            btn.textContent = '提取中...';
+            btn.disabled = true;
+
+            try {
+                const resp = await fetch('/api/extract', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ text: content })
+                });
+                const data = await resp.json();
+
+                document.getElementById('testMatchResult').style.display = 'block';
+                if (data.keywords && data.keywords.length > 0) {
+                    document.getElementById('testMatchKeywords').innerHTML =
+                        '<div style="color:#848e9c;margin-bottom:8px">提取关键词:</div>' +
+                        data.keywords.map(k => `<span style="background:#0ecb81;color:#fff;padding:4px 12px;border-radius:12px;margin-right:8px;font-weight:bold">${k}</span>`).join('') +
+                        `<div style="color:#848e9c;font-size:10px;margin-top:12px">使用API: ${data.api || 'unknown'}</div>`;
+                } else {
+                    document.getElementById('testMatchKeywords').innerHTML = '<span style="color:#848e9c">未提取到关键词</span>';
+                }
+            } catch (e) {
+                document.getElementById('testMatchResult').style.display = 'block';
+                document.getElementById('testMatchKeywords').innerHTML = '<span style="color:#f6465d">错误: ' + e.message + '</span>';
+            }
+
+            btn.textContent = '再次提取';
+            btn.disabled = false;
+        }
+
+        document.getElementById('testMatchModal').addEventListener('click', function(e) {
+            if (e.target === this) closeTestMatchModal();
+        });
+
+        // 启动服务
+        async function startService(serviceName) {
+            try {
+                const resp = await fetch('/api/start_service', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ service: serviceName })
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    // 2秒后刷新状态
+                    setTimeout(() => { refresh(); }, 2000);
+                } else {
+                    alert('启动失败: ' + (data.error || '未知错误'));
+                }
+            } catch (e) {
+                alert('启动失败: ' + e.message);
             }
         }
 
@@ -419,13 +822,25 @@ def api_status():
     for service in get_services():
         status = get_service_status(service)
         recent = get_recent_data(service)
+        name = service['name']
+
+        # 记录状态历史：比较 errors 计数
+        current_errors = status['data'].get('errors', 0) if status['data'] else 0
+        has_new_error = current_errors > last_errors[name]
+        last_errors[name] = current_errors
+
+        # True = 正常(绿), False = 有新错误(红)
+        status_history[name].append(not has_new_error)
+        history = list(status_history[name])
+
         results.append({
-            'name': service['name'],
+            'name': name,
             'desc': service['desc'],
             'port': service['port'],
             'status': status['status'],
             'data': status['data'],
-            'recent': recent
+            'recent': recent,
+            'history': history
         })
     return jsonify(results)
 
@@ -439,6 +854,111 @@ def api_matches():
     except:
         pass
     return jsonify([])
+
+
+@app.route('/api/import', methods=['POST'])
+def api_import():
+    """导入推文到数据库"""
+    from flask import request
+    try:
+        data = request.json
+        resp = requests.post(
+            f'{config.get_service_url("tracker")}/best_practices',
+            json=data,
+            timeout=5,
+            proxies={'http': None, 'https': None}
+        )
+        if resp.status_code == 200:
+            return jsonify(resp.json())
+        return jsonify({'success': False, 'error': resp.text}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/inject', methods=['POST'])
+def api_inject():
+    """注入推文到流中测试撮合"""
+    from flask import request
+    try:
+        data = request.json
+        resp = requests.post(
+            f'{config.get_service_url("news")}/inject',
+            json=data,
+            timeout=5,
+            proxies={'http': None, 'https': None}
+        )
+        if resp.status_code == 200:
+            return jsonify(resp.json())
+        return jsonify({'success': False, 'error': resp.text}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/extract', methods=['POST'])
+def api_extract():
+    """测试关键词提取"""
+    from flask import request
+    try:
+        data = request.json
+        resp = requests.post(
+            f'{config.get_service_url("match")}/extract_keywords',
+            json=data,
+            timeout=30,
+            proxies={'http': None, 'https': None}
+        )
+        if resp.status_code == 200:
+            return jsonify(resp.json())
+        return jsonify({'keywords': [], 'error': resp.text}), 400
+    except Exception as e:
+        return jsonify({'keywords': [], 'error': str(e)}), 500
+
+
+@app.route('/api/start_service', methods=['POST'])
+def api_start_service():
+    """启动服务"""
+    import subprocess
+    import os
+
+    data = request.json
+    service_name = data.get('service', '')
+
+    service_map = {
+        'news_service': 'news_service.py',
+        'token_service': 'token_service.py',
+        'tracker_service': 'tracker_service.py',
+        'match_service': 'match_service.py'
+    }
+
+    if service_name not in service_map:
+        return jsonify({'success': False, 'error': '未知服务'}), 400
+
+    script = service_map[service_name]
+    script_path = os.path.join(os.path.dirname(__file__), script)
+    log_path = f'/tmp/{service_name}.log'
+
+    try:
+        # 启动服务
+        subprocess.Popen(
+            ['python3', script_path],
+            stdout=open(log_path, 'w'),
+            stderr=subprocess.STDOUT,
+            cwd=os.path.dirname(__file__),
+            start_new_session=True
+        )
+        return jsonify({'success': True, 'message': f'{service_name} 启动中...'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/local_image/<filename>')
+def local_image(filename):
+    """提供本地注入的图片"""
+    import os
+    image_dir = os.path.join(os.path.dirname(__file__), 'image_cache')
+    filepath = os.path.join(image_dir, filename)
+    if os.path.exists(filepath):
+        return send_file(filepath)
+    return '', 404
 
 
 @app.route('/health')

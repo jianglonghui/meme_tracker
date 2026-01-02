@@ -93,6 +93,18 @@ def init_db():
         )
     ''')
 
+    # 最佳实践样例表（用于提示词）
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS best_practices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tweet_content TEXT NOT NULL,
+            keywords TEXT NOT NULL,
+            best_token TEXT NOT NULL,
+            note TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
     conn.commit()
     conn.close()
     print("[DB] 数据库初始化完成", flush=True)
@@ -401,11 +413,222 @@ def health():
     return jsonify({'status': 'ok'})
 
 
+# ==================== 最佳实践 API ====================
+
+@app.route('/best_practices', methods=['GET'])
+def get_best_practices():
+    """获取最佳实践样例（从匹配记录中获取）"""
+    conn = sqlite3.connect(config.DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    # 直接从匹配记录 + top_performers 获取
+    cursor.execute('''
+        SELECT m.id, m.news_content, m.keywords, t.token_symbol
+        FROM match_records m
+        JOIN top_performers t ON m.id = t.match_id
+        WHERE t.performance_rank = 1
+        ORDER BY m.created_at DESC
+        LIMIT 20
+    ''')
+
+    results = []
+    for r in cursor.fetchall():
+        results.append({
+            'id': r['id'],
+            'tweet_content': r['news_content'],
+            'keywords': json.loads(r['keywords']),
+            'best_token': r['token_symbol']
+        })
+
+    conn.close()
+    return jsonify(results)
+
+
+@app.route('/best_practices', methods=['POST'])
+def add_best_practice():
+    """手动添加匹配记录（推文+代币）"""
+    data = request.json
+    tweet_content = data.get('tweet_content', '')
+    keywords = data.get('keywords', [])
+    best_token = data.get('best_token', '')
+
+    if not tweet_content or not keywords or not best_token:
+        return jsonify({'success': False, 'error': '缺少必要字段'}), 400
+
+    conn = sqlite3.connect(config.DB_PATH)
+    cursor = conn.cursor()
+
+    # 1. 插入 match_records
+    cursor.execute('''
+        INSERT INTO match_records (news_time, news_author, news_author_name, news_avatar,
+            news_type, news_content, news_images, news_videos,
+            ref_author, ref_author_name, ref_avatar, ref_content, ref_images, keywords)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        int(time.time()), 'manual', '手动添加', '',
+        'manual', tweet_content, '[]', '[]',
+        '', '', '', '', '[]', json.dumps(keywords, ensure_ascii=False)
+    ))
+    match_id = cursor.lastrowid
+
+    # 2. 插入 top_performers
+    cursor.execute('''
+        INSERT INTO top_performers (match_id, performance_rank, token_address, token_symbol,
+            token_name, chain, initial_market_cap, final_market_cap, market_cap_change_pct, performance_score)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (match_id, 1, f'manual_{match_id}', best_token, best_token, 'MANUAL', 0, 0, 0, 0))
+
+    conn.commit()
+    conn.close()
+
+    return jsonify({'success': True, 'id': match_id})
+
+
+@app.route('/best_practices/<int:practice_id>', methods=['DELETE'])
+def delete_best_practice(practice_id):
+    """删除匹配记录"""
+    conn = sqlite3.connect(config.DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM top_performers WHERE match_id = ?', (practice_id,))
+    cursor.execute('DELETE FROM matched_tokens WHERE match_id = ?', (practice_id,))
+    cursor.execute('DELETE FROM match_records WHERE id = ?', (practice_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True})
+
+
+def insert_demo_data():
+    """插入预制样例数据"""
+    conn = sqlite3.connect(config.DB_PATH)
+    cursor = conn.cursor()
+
+    # 检查是否已有数据
+    cursor.execute('SELECT COUNT(*) FROM match_records')
+    if cursor.fetchone()[0] > 0:
+        conn.close()
+        return
+
+    print("[DB] 插入预制样例数据...", flush=True)
+
+    # 样例1: 币安一姐推文
+    demo_news_1 = {
+        'time': int(time.time()) - 300,
+        'author': 'heyibinance',
+        'authorName': 'Yi He',
+        'avatar': '',
+        'type': 'newTweet',
+        'content': '唉呀呀呀呀，感谢我Jason总，你可太性情太通透了，简直就是币安思维，祝你持有BNB开币安汽车，住币安小区，享币安人生🙏',
+        'images': [],
+        'videos': [],
+        'refAuthor': '',
+        'refAuthorName': '',
+        'refAvatar': '',
+        'refContent': '',
+        'refImages': []
+    }
+    keywords_1 = ['币安思维', 'bnb', '币安汽车', '币安小区', '币安人生']
+    tokens_1 = [{
+        'tokenAddress': '0xdemo1234567890',
+        'tokenSymbol': '币安人生',
+        'tokenName': '币安人生',
+        'chain': 'BSC',
+        'price': '0.00001',
+        'marketCap': 5000,
+        'holders': 50,
+        '_match_score': 5.0,
+        '_matched_keyword': '币安人生',
+        '_match_type': '完全匹配symbol',
+        '_final_score': 250
+    }]
+
+    # 样例2: Elon Musk
+    demo_news_2 = {
+        'time': int(time.time()) - 600,
+        'author': 'elonmusk',
+        'authorName': 'Elon Musk',
+        'avatar': '',
+        'type': 'newTweet',
+        'content': 'DOGE to the moon! 🚀',
+        'images': [],
+        'videos': [],
+        'refAuthor': '',
+        'refAuthorName': '',
+        'refAvatar': '',
+        'refContent': '',
+        'refImages': []
+    }
+    keywords_2 = ['doge', 'moon']
+    tokens_2 = [{
+        'tokenAddress': '0xdemo0987654321',
+        'tokenSymbol': 'DOGE',
+        'tokenName': 'Doge',
+        'chain': 'BSC',
+        'price': '0.00005',
+        'marketCap': 15000,
+        'holders': 120,
+        '_match_score': 5.0,
+        '_matched_keyword': 'doge',
+        '_match_type': '完全匹配symbol',
+        '_final_score': 600
+    }]
+
+    # 插入样例
+    for news, kws, toks in [(demo_news_1, keywords_1, tokens_1), (demo_news_2, keywords_2, tokens_2)]:
+        cursor.execute('''
+            INSERT INTO match_records (
+                news_time, news_author, news_author_name, news_avatar, news_type,
+                news_content, news_images, news_videos,
+                ref_author, ref_author_name, ref_avatar, ref_content, ref_images,
+                keywords
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            news['time'], news['author'], news['authorName'], news['avatar'], news['type'],
+            news['content'], json.dumps(news['images']), json.dumps(news['videos']),
+            news['refAuthor'], news['refAuthorName'], news['refAvatar'],
+            news['refContent'], json.dumps(news['refImages']),
+            json.dumps(kws, ensure_ascii=False)
+        ))
+        match_id = cursor.lastrowid
+
+        for rank, token in enumerate(toks, 1):
+            cursor.execute('''
+                INSERT INTO matched_tokens
+                (match_id, rank, token_address, token_symbol, token_name, chain,
+                 initial_price, initial_market_cap, initial_holders,
+                 match_score, match_keyword, match_type, final_score)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                match_id, rank, token['tokenAddress'], token['tokenSymbol'],
+                token['tokenName'], token['chain'], token['price'],
+                token['marketCap'], token['holders'], token['_match_score'],
+                token['_matched_keyword'], token['_match_type'], token['_final_score']
+            ))
+
+        # 插入最佳代币记录
+        for rank, token in enumerate(toks, 1):
+            cursor.execute('''
+                INSERT INTO top_performers
+                (match_id, performance_rank, token_address, token_symbol, token_name, chain,
+                 initial_market_cap, final_market_cap, market_cap_change_pct, performance_score)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                match_id, rank, token['tokenAddress'], token['tokenSymbol'],
+                token['tokenName'], token['chain'], token['marketCap'],
+                token['marketCap'] * 1.5, 50.0, 25.0
+            ))
+
+    conn.commit()
+    conn.close()
+    print("[DB] 预制样例数据插入完成", flush=True)
+
+
 if __name__ == "__main__":
     port = config.get_port('tracker')
     print(f"代币跟踪服务启动: http://127.0.0.1:{port}", flush=True)
 
     init_db()
+    insert_demo_data()
 
     tracker_thread = threading.Thread(target=tracking_worker, daemon=True)
     tracker_thread.start()

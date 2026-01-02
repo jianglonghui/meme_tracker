@@ -17,7 +17,33 @@ import config
 MEDIA_CACHE_DIR = os.path.join(os.path.dirname(__file__), 'media_cache')
 os.makedirs(MEDIA_CACHE_DIR, exist_ok=True)
 
+# 已处理推文缓存文件
+SEEN_EVENTS_FILE = os.path.join(os.path.dirname(__file__), 'seen_events.json')
+
 app = Flask(__name__)
+
+
+def load_seen_events():
+    """从文件加载已处理的推文 ID"""
+    try:
+        if os.path.exists(SEEN_EVENTS_FILE):
+            with open(SEEN_EVENTS_FILE, 'r') as f:
+                data = json.load(f)
+                # 只保留最近24小时的记录
+                cutoff = time.time() - 86400
+                return {k: v for k, v in data.items() if v > cutoff}
+    except Exception as e:
+        print(f"加载 seen_events 失败: {e}", flush=True)
+    return {}
+
+
+def save_seen_events(seen_events):
+    """保存已处理的推文 ID 到文件"""
+    try:
+        with open(SEEN_EVENTS_FILE, 'w') as f:
+            json.dump(seen_events, f)
+    except Exception as e:
+        print(f"保存 seen_events 失败: {e}", flush=True)
 
 # 状态统计
 stats = {
@@ -37,8 +63,14 @@ MAX_TOKENS = 500  # 缓存上限
 recent_matches = []
 recent_attempts = []
 recent_errors = []
+recent_filtered = []  # 过滤的推文
 log_lock = threading.Lock()
 MAX_LOG_SIZE = 20
+
+# 待检测队列（窗口期内持续检测）
+pending_news = []  # [{news_data, keywords, expire_time, matched_tokens}]
+pending_lock = threading.Lock()
+MAX_NEWS_AGE = 3600 * 1000  # 1小时（毫秒）
 
 
 def log_error(msg):
@@ -48,6 +80,20 @@ def log_error(msg):
         if len(recent_errors) > MAX_LOG_SIZE:
             recent_errors.pop(0)
     stats['errors'] += 1
+
+
+def log_filtered(author, content, reason, news_time):
+    """记录被过滤的推文"""
+    with log_lock:
+        recent_filtered.append({
+            'time': time.time(),
+            'news_time': news_time,
+            'author': author,
+            'content': content[:80],
+            'reason': reason
+        })
+        if len(recent_filtered) > MAX_LOG_SIZE:
+            recent_filtered.pop(0)
 
 
 def log_attempt(author, content, keywords, tokens_in_window, matched_count, window_token_names):
@@ -79,22 +125,65 @@ def log_match(author, content, tokens):
             recent_matches.pop(0)
 
 
+def get_best_practices():
+    """从 tracker_service 获取最佳实践样例"""
+    try:
+        resp = requests.get(
+            f"{config.get_service_url('tracker')}/best_practices",
+            timeout=5,
+            proxies={'http': None, 'https': None}
+        )
+        if resp.status_code == 200:
+            return resp.json()
+    except:
+        pass
+    return []
+
+
+def build_examples_prompt():
+    """构建最佳实践示例提示词"""
+    practices = get_best_practices()
+    if not practices:
+        return ""
+
+    examples = "\n\n最佳实践示例："
+    for i, p in enumerate(practices[:5], 1):
+        keywords_str = ', '.join(p['keywords'])
+        examples += f"\n示例{i}: 推文「{p['tweet_content'][:50]}...」→ 关键词: [{keywords_str}] → 匹配代币: {p['best_token']}"
+
+    return examples
+
+
 def call_deepseek(news_content):
     """调用 DeepSeek API 提取关键词"""
     if not config.DEEPSEEK_API_KEY:
         return []
 
-    prompt = f"""作为meme币分析师，从推文中提取可能被用作代币名称的关键词。
+    examples = build_examples_prompt()
+
+    prompt = f"""作为meme币分析师，从推文中提取最可能被用作代币名称的关键词。
 
 提取原则：
+- 最多返回3个关键词，按meme币潜力从高到低排序
 - 只提取推文原文中的词，不翻译不推断
 - 中文短语保持完整
-- 包含：缩写、数字年份、名词短语、情绪词、人名地名
-- 排除：链接、@用户名、冠词介词
+
+优先级排序（从高到低）：
+1. 亚文化符号/梗词（如milady、pepe、doge等有社区认同的词）
+2. 情绪词/口号（如"我踏马来了"、"LFG"、"WAGMI"）
+3. 人名/昵称（推文中提到的人物）
+4. 特殊名词/新造词
+
+排除：
+- 已存在的主流币名（BTC、ETH、SOL等）
+- 通用技术词汇（blockchain、gas、node等）
+- 年份数字（如2026）
+- 链接、@用户名、冠词介词
+{examples}
 
 推文：{news_content}
 
-返回JSON数组："""
+返回JSON数组（最多3个，按潜力排序）："""
 
     try:
         headers = {
@@ -111,9 +200,25 @@ def call_deepseek(news_content):
         if resp.status_code == 200:
             result = resp.json()
             content = result['choices'][0]['message']['content'].strip()
+            # 解析 JSON 数组（支持多种格式）
+            keywords = None
             if content.startswith('['):
                 keywords = json.loads(content)
-                return [k.lower() for k in keywords if isinstance(k, str)]
+            elif '```json' in content:
+                json_part = content.split('```json')[1].split('```')[0].strip()
+                keywords = json.loads(json_part)
+            elif '```' in content:
+                json_part = content.split('```')[1].split('```')[0].strip()
+                if json_part.startswith('['):
+                    keywords = json.loads(json_part)
+            elif '[' in content:
+                start = content.index('[')
+                end = content.rindex(']') + 1
+                keywords = json.loads(content[start:end])
+
+            if keywords:
+                result = [k.lower() for k in keywords if isinstance(k, str)]
+                return result[:3]  # 最多3个
     except Exception as e:
         log_error(f"DeepSeek API: {e}")
         print(f"[DeepSeek] 异常: {e}", flush=True)
@@ -123,6 +228,14 @@ def call_deepseek(news_content):
 def get_cached_image(url):
     """获取缓存的图片路径，如果不存在则下载"""
     try:
+        # 处理本地注入的图片 (/local_image/xxx.jpg)
+        if url.startswith('/local_image/'):
+            filename = url.split('/')[-1]
+            local_path = os.path.join(os.path.dirname(__file__), 'image_cache', filename)
+            if os.path.exists(local_path):
+                return local_path
+            return None
+
         # 使用 URL 的 MD5 作为文件名（与 dashboard 一致）
         cache_key = hashlib.md5(url.encode()).hexdigest()
 
@@ -164,19 +277,35 @@ def call_gemini_vision(news_content, image_paths=None):
 
         client = genai.Client(api_key=config.GEMINI_API_KEY)
 
-        prompt = f"""作为meme币分析师，从推文内容和图片中提取可能被用作代币名称的关键词。
+        examples = build_examples_prompt()
+
+        content_section = f"推文内容：{news_content}" if news_content else "（纯图片推文，无文字内容）"
+
+        prompt = f"""作为meme币分析师，从推文内容和图片中提取最可能被用作代币名称的关键词。
 
 提取原则：
+- 最多返回3个关键词，按meme币潜力从高到低排序
 - 从文字和图片中都提取关键词
-- 只提取推文原文中的词，不翻译不推断
-- 如果图片中有文字，提取图片中的关键词
+- 如果图片中有文字/标语/符号，优先提取
 - 中文短语保持完整
-- 包含：缩写、数字年份、名词短语、情绪词、人名地名、图片中的标语/文字
-- 排除：链接、@用户名、冠词介词
 
-推文内容：{news_content}
+优先级排序（从高到低）：
+1. 亚文化符号/梗词（如milady、pepe、doge等有社区认同的词）
+2. 图片中的文字、标语、符号名称
+3. 情绪词/口号（如"我踏马来了"、"LFG"、"WAGMI"）
+4. 人名/昵称（推文中提到的人物）
+5. 特殊名词/新造词
+6. 年份数字（如2026）
 
-返回JSON数组格式，只返回数组，不要其他内容："""
+排除：
+- 已存在的主流币名（BTC、ETH、SOL等）
+- 通用技术词汇（blockchain、gas、node等）
+- 链接、@用户名、冠词介词
+{examples}
+
+{content_section}
+
+返回JSON数组（最多3个，按潜力排序）："""
 
         # 构建 parts
         parts = [types.Part.from_text(text=prompt)]
@@ -207,18 +336,20 @@ def call_gemini_vision(news_content, image_paths=None):
         result_text = response.text.strip()
 
         # 解析 JSON 数组
+        keywords = None
         if result_text.startswith('['):
             keywords = json.loads(result_text)
-            return [k.lower() for k in keywords if isinstance(k, str)]
         elif '```json' in result_text:
             json_part = result_text.split('```json')[1].split('```')[0].strip()
             keywords = json.loads(json_part)
-            return [k.lower() for k in keywords if isinstance(k, str)]
         elif '[' in result_text:
             start = result_text.index('[')
             end = result_text.rindex(']') + 1
             keywords = json.loads(result_text[start:end])
-            return [k.lower() for k in keywords if isinstance(k, str)]
+
+        if keywords:
+            result = [k.lower() for k in keywords if isinstance(k, str)]
+            return result[:3]  # 最多3个
 
     except ImportError:
         log_error("Gemini: 需要安装 google-genai")
@@ -258,7 +389,7 @@ def calculate_match_score(keywords, symbol, name):
     match_type = None
 
     for kw in keywords:
-        if not kw or len(kw) < 2:
+        if not kw:
             continue
 
         score = 0
@@ -352,6 +483,88 @@ def send_to_tracker(news_data, keywords, matched_tokens):
     return False
 
 
+def add_to_pending(news_data, keywords):
+    """添加到待检测队列"""
+    news_time = news_data.get('time', 0)
+    expire_time = news_time + config.TIME_WINDOW_MS / 1000  # 窗口期结束时间（秒）
+
+    with pending_lock:
+        pending_news.append({
+            'news_data': news_data,
+            'keywords': keywords,
+            'expire_time': expire_time,
+            'matched_token_ids': set(),  # 已匹配的代币ID，避免重复
+            'status': 'pending'
+        })
+        print(f"[待检测] 添加 @{news_data.get('author')} 到队列，窗口期至 {expire_time}", flush=True)
+
+
+def check_pending_news():
+    """持续检测待检测队列中的推文"""
+    print("启动持续检测线程...", flush=True)
+
+    while stats['running']:
+        current_time = int(time.time())  # 秒级时间戳
+
+        with pending_lock:
+            # 移除过期的
+            expired = [p for p in pending_news if current_time > p['expire_time']]
+            for p in expired:
+                pending_news.remove(p)
+                author = p['news_data'].get('author', '')
+                matched_count = len(p['matched_token_ids'])
+                print(f"[待检测] @{author} 窗口期结束，共匹配 {matched_count} 个代币", flush=True)
+
+            # 检查未过期的
+            for pending in pending_news:
+                news_data = pending['news_data']
+                keywords = pending['keywords']
+                news_time = news_data.get('time', 0)
+
+                if not keywords:
+                    continue
+
+                # 检查新代币
+                with token_lock:
+                    for token in token_list:
+                        token_id = token.get('tokenAddress', '')
+                        if token_id in pending['matched_token_ids']:
+                            continue  # 已匹配过
+
+                        create_time = token.get('createTime', 0)
+                        if not create_time:
+                            continue
+
+                        # 检查时间窗口
+                        time_diff = abs(create_time - news_time * 1000)
+                        if time_diff > config.TIME_WINDOW_MS:
+                            continue
+
+                        symbol = (token.get('tokenSymbol') or '').lower()
+                        name = (token.get('tokenName') or '').lower()
+
+                        score, matched_kw, match_type = calculate_match_score(keywords, symbol, name)
+                        if score > 0:
+                            pending['matched_token_ids'].add(token_id)
+
+                            # 记录匹配
+                            token_copy = token.copy()
+                            token_copy['_match_score'] = score
+                            token_copy['_matched_keyword'] = matched_kw
+                            token_copy['_match_type'] = match_type
+
+                            author = news_data.get('author', '')
+                            print(f"[持续检测] @{author} 新匹配: {token.get('tokenSymbol')} (关键词: {matched_kw})", flush=True)
+
+                            # 发送到 tracker
+                            stats['total_matches'] += 1
+                            stats['last_match'] = time.time()
+                            log_match(author, news_data.get('content', ''), [token_copy])
+                            send_to_tracker(news_data, keywords, [token_copy])
+
+        time.sleep(2)  # 每2秒检查一次
+
+
 def fetch_token_stream():
     """监听代币流"""
     print("监听代币流...", flush=True)
@@ -380,7 +593,8 @@ def fetch_token_stream():
 def fetch_news_stream():
     """监听推文流并匹配"""
     print("监听推文流...", flush=True)
-    seen_events = set()
+    seen_events = load_seen_events()
+    last_save_time = time.time()
 
     while stats['running']:
         try:
@@ -396,7 +610,12 @@ def fetch_news_stream():
                         event_id = f"{data.get('time')}_{data.get('author')}_{data.get('type')}"
                         if event_id in seen_events:
                             continue
-                        seen_events.add(event_id)
+                        seen_events[event_id] = time.time()
+
+                        # 每30秒保存一次
+                        if time.time() - last_save_time > 30:
+                            save_seen_events(seen_events)
+                            last_save_time = time.time()
 
                         content = data.get('content', '') or ''
                         author = data.get('author', '')
@@ -404,11 +623,45 @@ def fetch_news_stream():
                         news_time = data.get('time', 0)
                         images = data.get('images', []) or []
 
+                        # 构建推文数据
+                        news_data = {
+                            'time': news_time,
+                            'author': author,
+                            'authorName': data.get('authorName', ''),
+                            'avatar': data.get('avatar', ''),
+                            'type': event_type,
+                            'content': content,
+                            'images': images,
+                            'videos': data.get('videos', []) or [],
+                            'refAuthor': data.get('refAuthor', ''),
+                            'refAuthorName': data.get('refAuthorName', ''),
+                            'refAvatar': data.get('refAvatar', ''),
+                            'refContent': data.get('refContent', ''),
+                            'refImages': data.get('refImages', []) or [],
+                        }
+
+                        # 检查推文时间，超过1小时的跳过
+                        current_time_ms = int(time.time() * 1000)
+                        news_age = current_time_ms - (news_time * 1000 if news_time < 10000000000 else news_time)
+
+                        if news_age > MAX_NEWS_AGE:
+                            age_hours = news_age / 3600000
+                            log_filtered(author, content, f"推文过期({age_hours:.1f}小时前)", news_time)
+                            print(f"[过滤] @{author} 推文过期 ({age_hours:.1f}小时前)", flush=True)
+                            continue
+
                         # 使用 Gemini（有图片时）或 DeepSeek 提取关键词
                         keywords, api_used = extract_keywords(content, images if images else None)
+
+                        if not keywords:
+                            log_filtered(author, content, "无法提取关键词", news_time)
+                            print(f"[过滤] @{author} 无法提取关键词", flush=True)
+                            continue
+
+                        # 立即匹配当前缓存的代币
                         matched_tokens, tokens_in_window, window_token_names = match_tokens(news_time, keywords)
 
-                        # 记录每次撮合尝试
+                        # 记录撮合尝试
                         log_attempt(author, content, keywords, tokens_in_window, len(matched_tokens), window_token_names)
 
                         if matched_tokens:
@@ -421,23 +674,12 @@ def fetch_news_stream():
                             print(f"  关键词: {keywords}", flush=True)
                             print(f"  匹配代币: {len(matched_tokens)} 个", flush=True)
 
-                            # 发送完整推文数据（与前端一致）
-                            news_data = {
-                                'time': news_time,
-                                'author': author,
-                                'authorName': data.get('authorName', ''),
-                                'avatar': data.get('avatar', ''),
-                                'type': event_type,
-                                'content': content,
-                                'images': images,
-                                'videos': data.get('videos', []) or [],
-                                'refAuthor': data.get('refAuthor', ''),
-                                'refAuthorName': data.get('refAuthorName', ''),
-                                'refAvatar': data.get('refAvatar', ''),
-                                'refContent': data.get('refContent', ''),
-                                'refImages': data.get('refImages', []) or [],
-                            }
                             send_to_tracker(news_data, keywords, matched_tokens)
+
+                        # 检查是否在窗口期内，如果是则加入持续检测队列
+                        window_end = news_time * 1000 + config.TIME_WINDOW_MS
+                        if current_time_ms < window_end:
+                            add_to_pending(news_data, keywords)
 
         except Exception as e:
             log_error(f"推文流: {e}")
@@ -447,6 +689,8 @@ def fetch_news_stream():
 
 @app.route('/status')
 def status():
+    with pending_lock:
+        pending_count = len(pending_news)
     return jsonify({
         'service': 'match_service',
         'port': config.MATCH_PORT,
@@ -454,6 +698,7 @@ def status():
         'total_matches': stats['total_matches'],
         'total_news': stats['total_news'],
         'tokens_cached': len(token_list),
+        'pending_detection': pending_count,
         'last_match': stats['last_match'],
         'errors': stats['errors']
     })
@@ -461,14 +706,25 @@ def status():
 
 @app.route('/recent')
 def recent():
-    """返回最近的匹配、撮合尝试和错误"""
+    """返回最近的匹配、撮合尝试、过滤和错误"""
     with log_lock:
         matches = list(recent_matches)[::-1]
         attempts = list(recent_attempts)[::-1]
+        filtered = list(recent_filtered)[::-1]
         errors = list(recent_errors)[::-1]
+    with pending_lock:
+        pending = [{
+            'author': p['news_data'].get('author', ''),
+            'content': p['news_data'].get('content', '')[:50],
+            'keywords': p['keywords'][:5] if p['keywords'] else [],
+            'matched_count': len(p['matched_token_ids']),
+            'expire_time': p['expire_time']
+        } for p in pending_news]
     return jsonify({
         'matches': matches,
         'attempts': attempts,
+        'filtered': filtered,
+        'pending': pending,
         'errors': errors
     })
 
@@ -476,6 +732,22 @@ def recent():
 @app.route('/health')
 def health():
     return jsonify({'status': 'ok'})
+
+
+@app.route('/extract_keywords', methods=['POST'])
+def test_extract_keywords():
+    """测试关键词提取"""
+    from flask import request
+    data = request.get_json()
+    text = data.get('text', '')
+    images = data.get('images', [])
+
+    keywords, api_used = extract_keywords(text, images if images else None)
+    return jsonify({
+        'text': text,
+        'keywords': keywords,
+        'api': api_used
+    })
 
 
 if __name__ == "__main__":
@@ -491,5 +763,9 @@ if __name__ == "__main__":
     # 启动推文流监听
     news_thread = threading.Thread(target=fetch_news_stream, daemon=True)
     news_thread.start()
+
+    # 启动持续检测线程
+    pending_thread = threading.Thread(target=check_pending_news, daemon=True)
+    pending_thread.start()
 
     app.run(host='0.0.0.0', port=config.get_port('match'), debug=False, threaded=True)

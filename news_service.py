@@ -227,6 +227,70 @@ def recent():
     return jsonify({'items': items, 'errors': recent_errors})
 
 
+@app.route('/inject', methods=['POST'])
+def inject():
+    """注入推文到流中（用于测试撮合）"""
+    import base64
+    import os
+    import hashlib
+
+    from flask import request
+    data = request.json
+    content = data.get('content', '')
+    author = data.get('author', 'test_user')
+    author_name = data.get('author_name', '测试用户')
+    image_data = data.get('image', '')  # base64 图片
+
+    if not content and not image_data:
+        return jsonify({'success': False, 'error': '推文内容或图片至少需要一项'}), 400
+
+    # 处理图片
+    file_urls = []
+    if image_data and image_data.startswith('data:image'):
+        try:
+            # 解析 base64
+            header, encoded = image_data.split(',', 1)
+            ext = '.png' if 'png' in header else '.jpg'
+            img_bytes = base64.b64decode(encoded)
+
+            # 保存到 image_cache 目录
+            cache_dir = os.path.join(os.path.dirname(__file__), 'image_cache')
+            os.makedirs(cache_dir, exist_ok=True)
+            filename = hashlib.md5(img_bytes).hexdigest() + ext
+            filepath = os.path.join(cache_dir, filename)
+            with open(filepath, 'wb') as f:
+                f.write(img_bytes)
+
+            # 使用相对路径，通过 dashboard 的 /local_image 访问
+            file_urls.append(f'/local_image/{filename}')
+            print(f"[注入] 保存图片: {filename}", flush=True)
+        except Exception as e:
+            print(f"[注入] 图片处理失败: {e}", flush=True)
+
+    # 构造推文数据（模拟API格式）
+    item = {
+        'eventTime': int(time.time()),
+        'eventType': 'newTweet',
+        'contentNew': content,
+        'user': {
+            'handle': author,
+            'username': author_name,
+            'profilePic': ''
+        },
+        'referenceUser': {},
+        'fileUrls': json.dumps(file_urls) if file_urls else '[]',
+        'videoUrls': '[]',
+        'referencedFiles': '[]'
+    }
+
+    with news_lock:
+        news_list.append(item)
+        stats['total_news'] += 1
+
+    print(f"[注入] @{author} - {content[:50]}..." + (f" (含{len(file_urls)}张图)" if file_urls else ""), flush=True)
+    return jsonify({'success': True, 'time': item['eventTime'], 'images': len(file_urls)})
+
+
 @app.route('/health')
 def health():
     return jsonify({'status': 'ok'})
