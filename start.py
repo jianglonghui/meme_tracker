@@ -93,6 +93,8 @@ def print_banner():
     print()
 
 
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+
 def start_service(service):
     """启动单个服务"""
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -102,16 +104,19 @@ def start_service(service):
         print(f"  ✗ {service['desc']} - 文件不存在: {service['file']}")
         return None
 
+    # 创建日志目录
+    os.makedirs(LOG_DIR, exist_ok=True)
+    log_file = os.path.join(LOG_DIR, f"{service['name']}.log")
+
+    log_fd = open(log_file, 'w')
     proc = subprocess.Popen(
         [PYTHON_EXE, script_path],
         cwd=script_dir,
-        stdout=subprocess.PIPE,
+        stdout=log_fd,
         stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
         env=os.environ.copy()  # 传递环境变量
     )
-    return proc
+    return proc, log_fd
 
 
 def check_service(port, timeout=5):
@@ -135,9 +140,10 @@ def start_all():
 
     for service in SERVICES:
         print(f"  → 启动 {service['desc']} (:{service['port']})...", end=' ', flush=True)
-        proc = start_service(service)
-        if proc:
-            processes.append({'service': service, 'process': proc})
+        result = start_service(service)
+        if result:
+            proc, log_fd = result
+            processes.append({'service': service, 'process': proc, 'log_fd': log_fd})
             time.sleep(1)  # 等待服务启动
 
             if check_service(service['port']):
@@ -157,6 +163,8 @@ def start_all():
 
     print("="*60)
     print(f"\n控制面板: http://127.0.0.1:{PORTS['dashboard']}")
+    print(f"\n日志目录: {LOG_DIR}/")
+    print("  查看日志: tail -f /tmp/meme_tracker/<service_name>.log")
     print("\n按 Ctrl+C 停止所有服务...")
 
 
@@ -171,6 +179,9 @@ def stop_all():
                 proc.wait(timeout=3)
             except:
                 proc.kill()
+        # 关闭日志文件
+        if 'log_fd' in item and item['log_fd']:
+            item['log_fd'].close()
     print("所有服务已停止")
 
 
@@ -179,17 +190,16 @@ def signal_handler(sig, frame):
     sys.exit(0)
 
 
-def show_logs():
-    """显示所有服务的日志"""
+def wait_forever():
+    """等待直到收到中断信号"""
     while True:
+        # 检查服务是否还在运行
         for item in processes:
             proc = item['process']
-            service = item['service']
-            if proc.stdout:
-                line = proc.stdout.readline()
-                if line:
-                    print(f"[{service['name']}] {line}", end='')
-        time.sleep(0.1)
+            if proc.poll() is not None:
+                service = item['service']
+                print(f"\n⚠️  {service['desc']} 已退出，查看日志: {LOG_DIR}/{service['name']}.log")
+        time.sleep(5)
 
 
 if __name__ == "__main__":
@@ -199,6 +209,6 @@ if __name__ == "__main__":
     start_all()
 
     try:
-        show_logs()
+        wait_forever()
     except KeyboardInterrupt:
         stop_all()
