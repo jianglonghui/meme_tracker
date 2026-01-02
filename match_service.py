@@ -519,7 +519,7 @@ def push_to_telegram(news_data, keywords, matched_tokens):
         pass
 
 
-def add_to_pending(news_data, keywords):
+def add_to_pending(news_data, keywords, matched_ids=None):
     """添加到待检测队列"""
     news_time = news_data.get('time', 0)
     expire_time = news_time + config.TIME_WINDOW_MS / 1000  # 窗口期结束时间（秒）
@@ -529,7 +529,7 @@ def add_to_pending(news_data, keywords):
             'news_data': news_data,
             'keywords': keywords,
             'expire_time': expire_time,
-            'matched_token_ids': set(),  # 已匹配的代币ID，避免重复
+            'matched_token_ids': set(matched_ids) if matched_ids else set(),
             'status': 'pending'
         })
         print(f"[待检测] 添加 @{news_data.get('author')} 到队列，窗口期至 {expire_time}", flush=True)
@@ -572,20 +572,15 @@ def check_pending_news():
                             continue
 
                         # 检查时间窗口
-                        time_diff = abs(create_time - news_time * 1000)
+                        news_time_ms = news_time * 1000 if news_time < 10000000000 else news_time
+                        time_diff = abs(create_time - news_time_ms)
                         if time_diff > config.TIME_WINDOW_MS:
                             continue
 
                         symbol = (token.get('tokenSymbol') or '').lower()
                         name = (token.get('tokenName') or '').lower()
 
-                        # 调试：打印窗口内的代币
-                        author = news_data.get('author', '')
-                        print(f"[持续检测] @{author} 窗口内代币: {token.get('tokenSymbol')} (时差: {time_diff/1000:.1f}s)", flush=True)
-                        print(f"[持续检测] 关键词: {keywords}, symbol: {symbol}, name: {name}", flush=True)
-
                         score, matched_kw, match_type = calculate_match_score(keywords, symbol, name)
-                        print(f"[持续检测] 匹配分数: {score}, 匹配词: {matched_kw}", flush=True)
                         if score > 0:
                             pending['matched_token_ids'].add(token_id)
 
@@ -596,7 +591,6 @@ def check_pending_news():
                             token_copy['_match_type'] = match_type
 
                             author = news_data.get('author', '')
-                            print(f"[持续检测] @{author} 新匹配: {token.get('tokenSymbol')} (关键词: {matched_kw})", flush=True)
 
                             # 发送到 tracker
                             stats['total_matches'] += 1
@@ -612,8 +606,8 @@ def fetch_token_stream():
     print("监听代币流...", flush=True)
     while stats['running']:
         try:
-            # 本地连接不使用代理
-            resp = requests.get(f"{config.get_service_url('token')}/stream", stream=True, timeout=60, proxies={'http': None, 'https': None})
+            # 本地连接不使用代理，timeout=(连接超时, 读取超时)
+            resp = requests.get(f"{config.get_service_url('token')}/stream", stream=True, timeout=(5, None), proxies={'http': None, 'https': None})
             for line in resp.iter_lines():
                 if line:
                     line = line.decode('utf-8')
@@ -723,7 +717,9 @@ def fetch_news_stream():
                         # 检查是否在窗口期内，如果是则加入持续检测队列
                         window_end = news_time * 1000 + config.TIME_WINDOW_MS
                         if current_time_ms < window_end:
-                            add_to_pending(news_data, keywords)
+                            # 传入已匹配的代币ID，避免重复匹配
+                            matched_ids = [t.get('tokenAddress') for t in matched_tokens] if matched_tokens else []
+                            add_to_pending(news_data, keywords, matched_ids)
 
         except Exception as e:
             log_error(f"推文流: {e}")

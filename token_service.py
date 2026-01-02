@@ -312,7 +312,6 @@ def inject():
     data = request.json
     symbol = data.get('symbol', '')
     name = data.get('name', '')
-    # 支持 ca 和 address 两种参数名
     address = data.get('ca') or data.get('address') or f'test_{int(time.time())}'
 
     if not symbol:
@@ -334,7 +333,7 @@ def inject():
         token_dict[address] = token
         stats['total_tokens'] += 1
 
-    print(f"[注入] 代币: {symbol} ({name or symbol})", flush=True)
+    print(f"[注入] 代币: {symbol} ({name or symbol}), CA: {address}", flush=True)
     return jsonify({'success': True, 'token': token})
 
 
