@@ -10,8 +10,12 @@ import threading
 import time
 import os
 import hashlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, jsonify
 import config
+
+# 线程池：用于并行处理推文
+executor = ThreadPoolExecutor(max_workers=10)
 
 # 图片缓存目录（与 dashboard 共用）
 MEDIA_CACHE_DIR = os.path.join(os.path.dirname(__file__), 'media_cache')
@@ -62,7 +66,10 @@ def search_binance_tokens(keyword):
             chain_id = token.get('chainId', '')
             chain_name = 'SOL' if chain_id == 'CT_501' else 'BSC' if chain_id == '56' else 'BASE' if chain_id == '8453' else chain_id
 
-            if (mcap >= config.SEARCH_MIN_MCAP and
+            # SOL链市值门槛更高（1000万），其他链200k
+            min_mcap = config.SEARCH_MIN_MCAP_SOL if chain_name == 'SOL' else config.SEARCH_MIN_MCAP
+
+            if (mcap >= min_mcap and
                 liquidity >= config.SEARCH_MIN_LIQUIDITY and
                 age_seconds >= config.SEARCH_MIN_AGE_SECONDS):
                 quality_tokens.append({
@@ -519,7 +526,8 @@ def match_tokens(news_time, keywords):
 
                 if keywords:
                     score, matched_kw, match_type = calculate_match_score(keywords, symbol, name)
-                    if score > 0:
+                    # 新币只看匹配分数，追踪后看涨幅
+                    if score >= config.MIN_MATCH_SCORE:
                         token_copy = token.copy()
                         token_copy['_match_score'] = score
                         token_copy['_matched_keyword'] = matched_kw
@@ -714,15 +722,103 @@ def fetch_token_stream():
             time.sleep(2)
 
 
+def process_news_item(news_data, full_content, all_images):
+    """
+    处理单条推文（在线程池中执行）
+    提取关键词后，并行启动新币匹配和老币搜索，各自完成后立即推送
+    """
+    author = news_data.get('author', '')
+    content = news_data.get('content', '')
+    news_time = news_data.get('time', 0)
+    current_time_ms = int(time.time() * 1000)
+
+    try:
+        # 1. 提取关键词
+        keywords, api_used = extract_keywords(full_content, all_images if all_images else None)
+
+        if not keywords:
+            log_filtered(author, content, "无法提取关键词", news_time)
+            print(f"[过滤] @{author} 无法提取关键词", flush=True)
+            return
+
+        api_tag = "[Gemini+图片]" if api_used == 'gemini' else "[DeepSeek]"
+        print(f"[关键词] {api_tag} @{author}: {keywords}", flush=True)
+
+        # 记录撮合尝试
+        log_attempt(author, content, keywords, 0, 0, [])
+
+        # 2. 并行启动：新币匹配 + 老币搜索（各自完成后立即推送）
+        def match_and_send_new():
+            """匹配新币，完成后立即推送"""
+            matched_tokens, tokens_in_window, window_token_names = match_tokens(news_time, keywords)
+            if matched_tokens:
+                stats['total_matches'] += 1
+                stats['last_match'] = time.time()
+                log_match(author, content, matched_tokens)
+                print(f"[新币] @{author}: {len(matched_tokens)} 个匹配", flush=True)
+                send_to_tracker(news_data, keywords, matched_tokens)
+
+            # 加入持续检测队列
+            window_end = news_time * 1000 + config.TIME_WINDOW_MS
+            if current_time_ms < window_end:
+                matched_ids = [t.get('tokenAddress') for t in matched_tokens] if matched_tokens else []
+                add_to_pending(news_data, keywords, matched_ids)
+
+        def search_and_send_old():
+            """搜索老币，计算匹配分数，达标后推送"""
+            search_tokens = []
+            for kw in keywords[:3]:
+                search_result = search_binance_tokens(kw)
+                for token in search_result:
+                    if any(t.get('address') == token['address'] for t in search_tokens):
+                        continue
+                    # 计算匹配分数
+                    symbol = (token.get('symbol') or '').lower()
+                    name = (token.get('name') or '').lower()
+                    score, matched_kw, match_type = calculate_match_score(keywords, symbol, name)
+                    # 只保留达到最小分数的代币
+                    if score >= config.MIN_MATCH_SCORE:
+                        token['_match_score'] = score
+                        token['_matched_keyword'] = matched_kw
+                        token['_match_type'] = match_type
+                        search_tokens.append(token)
+
+            if search_tokens:
+                stats['total_matches'] += 1
+                stats['last_match'] = time.time()
+                print(f"[老币] @{author}: {len(search_tokens)} 个 ({', '.join(t['symbol'] for t in search_tokens[:3])})", flush=True)
+                # 转换格式后发送（包含匹配分数）
+                formatted = [{
+                    'tokenAddress': t['address'],
+                    'tokenSymbol': t['symbol'],
+                    'tokenName': t['name'],
+                    'chain': t['chain'],
+                    'marketCap': t['marketCap'],
+                    'liquidity': t.get('liquidity', 0),
+                    'source': 'binance_search',
+                    '_match_score': t.get('_match_score', 0),
+                    '_matched_keyword': t.get('_matched_keyword', ''),
+                    '_match_type': t.get('_match_type', '')
+                } for t in search_tokens]
+                send_to_tracker(news_data, keywords, formatted)
+
+        # 并行执行，不等待
+        executor.submit(match_and_send_new)
+        executor.submit(search_and_send_old)
+
+    except Exception as e:
+        log_error(f"处理推文异常: {e}")
+        print(f"[异常] @{author} 处理失败: {e}", flush=True)
+
+
 def fetch_news_stream():
-    """监听推文流并匹配"""
+    """监听推文流，收到后立即派发到线程池处理（不阻塞）"""
     print("监听推文流...", flush=True)
     seen_events = load_seen_events()
     last_save_time = time.time()
 
     while stats['running']:
         try:
-            # 本地连接不使用代理
             resp = requests.get(f"{config.get_service_url('news')}/stream", stream=True, timeout=60, proxies={'http': None, 'https': None})
             for line in resp.iter_lines():
                 if line:
@@ -774,61 +870,17 @@ def fetch_news_stream():
                             print(f"[过滤] @{author} 推文过期 ({age_hours:.1f}小时前)", flush=True)
                             continue
 
-                        # 合并内容（包括引用推文内容）
+                        # 合并内容和图片
                         ref_content = data.get('refContent', '') or ''
                         full_content = content
                         if ref_content:
                             full_content = f"{content}\n\n引用推文: {ref_content}" if content else ref_content
-                        # 合并图片（包括引用推文图片）
                         ref_images = data.get('refImages', []) or []
                         all_images = images + ref_images if ref_images else images
 
-                        # 使用 Gemini（有图片时）或 DeepSeek 提取关键词
-                        keywords, api_used = extract_keywords(full_content, all_images if all_images else None)
-
-                        if not keywords:
-                            log_filtered(author, content, "无法提取关键词", news_time)
-                            print(f"[过滤] @{author} 无法提取关键词", flush=True)
-                            continue
-
-                        # 立即匹配当前缓存的代币（新币）
-                        matched_tokens, tokens_in_window, window_token_names = match_tokens(news_time, keywords)
-
-                        # 同时搜索 Binance 优质代币（老币）
-                        search_tokens = []
-                        for kw in keywords[:3]:  # 只搜前3个关键词
-                            search_result = search_binance_tokens(kw)
-                            for token in search_result:
-                                if not any(t.get('address') == token['address'] for t in search_tokens):
-                                    search_tokens.append(token)
-
-                        # 记录撮合尝试
-                        total_matched = len(matched_tokens) + len(search_tokens)
-                        log_attempt(author, content, keywords, tokens_in_window, total_matched, window_token_names)
-
-                        if matched_tokens or search_tokens:
-                            stats['total_matches'] += 1
-                            stats['last_match'] = time.time()
-
-                            api_tag = "[Gemini+图片]" if api_used == 'gemini' else "[DeepSeek]"
-                            print(f"\n[匹配] {api_tag} @{author}: {content[:50]}...", flush=True)
-                            print(f"  关键词: {keywords}", flush=True)
-                            if matched_tokens:
-                                log_match(author, content, matched_tokens)
-                                print(f"  新币匹配: {len(matched_tokens)} 个", flush=True)
-                            if search_tokens:
-                                print(f"  搜索优质: {len(search_tokens)} 个 ({', '.join(t['symbol'] for t in search_tokens[:3])})", flush=True)
-
-                            # 合并发送到 tracker（新币优先）
-                            all_tokens = matched_tokens + [{'tokenAddress': t['address'], 'tokenSymbol': t['symbol'], 'tokenName': t['name'], 'chain': t['chain'], 'marketCap': t['marketCap'], 'liquidity': t.get('liquidity', 0), 'source': 'binance_search'} for t in search_tokens]
-                            send_to_tracker(news_data, keywords, all_tokens)
-
-                        # 检查是否在窗口期内，如果是则加入持续检测队列
-                        window_end = news_time * 1000 + config.TIME_WINDOW_MS
-                        if current_time_ms < window_end:
-                            # 传入已匹配的代币ID，避免重复匹配
-                            matched_ids = [t.get('tokenAddress') for t in matched_tokens] if matched_tokens else []
-                            add_to_pending(news_data, keywords, matched_ids)
+                        # 立即派发到线程池处理（不阻塞主循环）
+                        executor.submit(process_news_item, news_data, full_content, all_images)
+                        print(f"[派发] @{author} 已加入处理队列", flush=True)
 
         except Exception as e:
             log_error(f"推文流: {e}")

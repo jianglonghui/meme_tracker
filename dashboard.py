@@ -152,7 +152,12 @@ HTML_TEMPLATE = """
 
         <h2 style="display:flex;justify-content:space-between;align-items:center">
             数据库匹配记录
-            <button onclick="openImportModal()" style="background:#F0B90B;color:#000;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;font-size:12px">+ 导入推文</button>
+            <div style="display:flex;gap:8px">
+                <button id="deleteBtn" onclick="toggleDeleteMode()" style="background:#363c45;color:#eaecef;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;font-size:12px">删除</button>
+                <button id="confirmDeleteBtn" onclick="confirmDelete()" style="display:none;background:#f6465d;color:#fff;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;font-size:12px">确认删除</button>
+                <button id="cancelDeleteBtn" onclick="cancelDeleteMode()" style="display:none;background:#363c45;color:#eaecef;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;font-size:12px">取消</button>
+                <button onclick="openImportModal()" style="background:#F0B90B;color:#000;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;font-size:12px">+ 导入推文</button>
+            </div>
         </h2>
         <div class="matches" id="matches">
             <div class="no-data">加载中...</div>
@@ -309,10 +314,75 @@ HTML_TEMPLATE = """
 
         let tokenChainFilter = 'ALL';
         let lastServiceData = {};  // 每个服务的上次数据
+        let deleteMode = false;  // 删除模式
+        let selectedIds = new Set();  // 选中的记录ID
+
         function setTokenChainFilter(chain) {
             tokenChainFilter = chain;
             lastServiceData['token_service'] = '';  // 强制刷新
             refresh();
+        }
+
+        function toggleDeleteMode() {
+            deleteMode = true;
+            selectedIds.clear();
+            document.getElementById('deleteBtn').style.display = 'none';
+            document.getElementById('confirmDeleteBtn').style.display = 'inline-block';
+            document.getElementById('cancelDeleteBtn').style.display = 'inline-block';
+            updateDeleteBtnText();
+            refresh();
+        }
+
+        function cancelDeleteMode() {
+            deleteMode = false;
+            selectedIds.clear();
+            document.getElementById('deleteBtn').style.display = 'inline-block';
+            document.getElementById('confirmDeleteBtn').style.display = 'none';
+            document.getElementById('cancelDeleteBtn').style.display = 'none';
+            refresh();
+        }
+
+        function toggleSelectRecord(id) {
+            if (selectedIds.has(id)) {
+                selectedIds.delete(id);
+            } else {
+                selectedIds.add(id);
+            }
+            updateDeleteBtnText();
+            // 更新复选框状态
+            const checkbox = document.getElementById('check-' + id);
+            if (checkbox) checkbox.checked = selectedIds.has(id);
+        }
+
+        function updateDeleteBtnText() {
+            const btn = document.getElementById('confirmDeleteBtn');
+            btn.textContent = selectedIds.size > 0 ? `确认删除 (${selectedIds.size})` : '确认删除';
+        }
+
+        async function confirmDelete() {
+            if (selectedIds.size === 0) {
+                alert('请选择要删除的记录');
+                return;
+            }
+            if (!confirm(`确定删除 ${selectedIds.size} 条记录吗？`)) {
+                return;
+            }
+            try {
+                const resp = await fetch('api/delete_records', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ ids: Array.from(selectedIds) })
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    cancelDeleteMode();
+                    refresh();
+                } else {
+                    alert('删除失败: ' + (data.error || '未知错误'));
+                }
+            } catch (e) {
+                alert('删除失败: ' + e.message);
+            }
         }
 
         // 单独更新时间戳和时间线（不重新渲染DOM）
@@ -684,6 +754,15 @@ HTML_TEMPLATE = """
             };
 
             container.innerHTML = data.map(m => {
+                // 复选框（删除模式下显示）
+                const checkboxHtml = deleteMode
+                    ? `<div style="margin-right:12px;display:flex;align-items:center">
+                        <input type="checkbox" id="check-${m.id}" ${selectedIds.has(m.id) ? 'checked' : ''}
+                            onclick="toggleSelectRecord(${m.id})"
+                            style="width:18px;height:18px;cursor:pointer;accent-color:#f6465d">
+                       </div>`
+                    : '';
+
                 // 最佳代币
                 const bestTokensHtml = m.best_tokens && m.best_tokens.length > 0
                     ? m.best_tokens.map(t => `<span class="token-badge">${t.token_symbol}</span>`).join('')
@@ -709,23 +788,26 @@ HTML_TEMPLATE = """
                     ? `<div style="font-size:11px;color:#848e9c;margin-top:6px">关键词: ${m.keywords.join(', ')}</div>`
                     : '';
 
-                return `<div class="match-item">
-                    <div style="display:flex;align-items:flex-start">
-                        ${avatarHtml}
-                        <div style="flex:1">
-                            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
-                                <span class="match-author">@${m.author || 'Unknown'}</span>
-                                <span style="color:#848e9c;font-size:12px">${m.authorName || ''}</span>
-                                <span style="color:#848e9c;font-size:11px">${formatTime(m.time)}</span>
+                return `<div class="match-item" style="${deleteMode ? 'display:flex;align-items:flex-start' : ''}">
+                    ${checkboxHtml}
+                    <div style="flex:1">
+                        <div style="display:flex;align-items:flex-start">
+                            ${avatarHtml}
+                            <div style="flex:1">
+                                <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+                                    <span class="match-author">@${m.author || 'Unknown'}</span>
+                                    <span style="color:#848e9c;font-size:12px">${m.authorName || ''}</span>
+                                    <span style="color:#848e9c;font-size:11px">${formatTime(m.time)}</span>
+                                </div>
+                                <div class="match-content">${m.content || ''}</div>
+                                ${imagesHtml}
+                                ${keywordsHtml}
                             </div>
-                            <div class="match-content">${m.content || ''}</div>
-                            ${imagesHtml}
-                            ${keywordsHtml}
                         </div>
-                    </div>
-                    <div style="margin-top:10px;padding-top:10px;border-top:1px solid #2b3139">
-                        <span style="color:#f0b90b;font-size:12px;margin-right:8px">🎯 最佳代币:</span>
-                        <div class="match-tokens" style="display:inline">${bestTokensHtml}</div>
+                        <div style="margin-top:10px;padding-top:10px;border-top:1px solid #2b3139">
+                            <span style="color:#f0b90b;font-size:12px;margin-right:8px">🎯 最佳代币:</span>
+                            <div class="match-tokens" style="display:inline">${bestTokensHtml}</div>
+                        </div>
                     </div>
                 </div>`;
             }).join('');
@@ -1163,6 +1245,24 @@ def api_inject_token():
             f'{config.get_service_url("token")}/inject',
             json=data,
             timeout=5,
+            proxies={'http': None, 'https': None}
+        )
+        if resp.status_code == 200:
+            return jsonify(resp.json())
+        return jsonify({'success': False, 'error': resp.text}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/delete_records', methods=['POST'])
+def api_delete_records():
+    """批量删除匹配记录"""
+    try:
+        data = request.json
+        resp = requests.post(
+            f'{config.get_service_url("tracker")}/delete_records',
+            json=data,
+            timeout=10,
             proxies={'http': None, 'https': None}
         )
         if resp.status_code == 200:
