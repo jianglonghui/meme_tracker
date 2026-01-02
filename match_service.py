@@ -112,6 +112,17 @@ def log_attempt(author, content, keywords, tokens_in_window, matched_count, wind
             recent_attempts.pop(0)
 
 
+def update_attempt(content, tokens_in_window, matched_count, window_token_names):
+    """更新已有的撮合尝试记录（用于 pending 检测更新）"""
+    with log_lock:
+        for attempt in recent_attempts:
+            if attempt['content'] == content[:100]:
+                attempt['tokens_in_window'] = tokens_in_window
+                attempt['matched'] = matched_count
+                attempt['window_tokens'] = window_token_names[:5] if window_token_names else []
+                break
+
+
 def log_match(author, content, tokens):
     """记录匹配"""
     with log_lock:
@@ -556,17 +567,19 @@ def check_pending_news():
                 news_data = pending['news_data']
                 keywords = pending['keywords']
                 news_time = news_data.get('time', 0)
+                content = news_data.get('content', '')
 
                 if not keywords:
                     continue
+
+                # 统计窗口内代币
+                window_tokens = []
+                window_token_names = []
 
                 # 检查新代币
                 with token_lock:
                     for token in token_list:
                         token_id = token.get('tokenAddress', '')
-                        if token_id in pending['matched_token_ids']:
-                            continue  # 已匹配过
-
                         create_time = token.get('createTime', 0)
                         if not create_time:
                             continue
@@ -576,6 +589,14 @@ def check_pending_news():
                         time_diff = abs(create_time - news_time_ms)
                         if time_diff > config.TIME_WINDOW_MS:
                             continue
+
+                        # 在窗口内
+                        token_name = token.get('tokenSymbol') or token.get('tokenName') or 'Unknown'
+                        if token_name not in window_token_names:
+                            window_token_names.append(token_name)
+
+                        if token_id in pending['matched_token_ids']:
+                            continue  # 已匹配过
 
                         symbol = (token.get('tokenSymbol') or '').lower()
                         name = (token.get('tokenName') or '').lower()
@@ -595,8 +616,12 @@ def check_pending_news():
                             # 发送到 tracker
                             stats['total_matches'] += 1
                             stats['last_match'] = time.time()
-                            log_match(author, news_data.get('content', ''), [token_copy])
+                            log_match(author, content, [token_copy])
                             send_to_tracker(news_data, keywords, [token_copy])
+
+                # 更新 attempt 记录的窗口代币信息
+                if window_token_names:
+                    update_attempt(content, len(window_token_names), len(pending['matched_token_ids']), window_token_names)
 
         time.sleep(2)  # 每2秒检查一次
 

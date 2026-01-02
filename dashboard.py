@@ -143,8 +143,11 @@ HTML_TEMPLATE = """
         <h1>🚀 Meme Tracker Dashboard</h1>
 
         <h2>服务状态</h2>
-        <div class="services" id="services">
-            <div class="service-card"><div class="service-name">加载中...</div></div>
+        <div class="services">
+            <div id="news_service_card"></div>
+            <div id="token_service_card"></div>
+            <div id="tracker_service_card"></div>
+            <div id="match_service_card"></div>
         </div>
 
         <h2 style="display:flex;justify-content:space-between;align-items:center">
@@ -266,6 +269,27 @@ HTML_TEMPLATE = """
             return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
         }
 
+        // 更新所有倒计时元素
+        function updateCountdowns() {
+            const now = Math.floor(Date.now() / 1000);
+            let needRefresh = false;
+            document.querySelectorAll('.countdown').forEach(el => {
+                const expire = parseInt(el.dataset.expire);
+                if (expire) {
+                    const remaining = Math.max(0, expire - now);
+                    if (remaining <= 0) {
+                        needRefresh = true;
+                    } else {
+                        const mins = Math.floor(remaining / 60);
+                        const secs = remaining % 60;
+                        el.textContent = `检测中 ${mins}:${secs.toString().padStart(2,'0')}`;
+                    }
+                }
+            });
+            if (needRefresh) refresh();
+        }
+        setInterval(updateCountdowns, 1000);
+
         function copyText(text) {
             const textarea = document.createElement('textarea');
             textarea.value = text;
@@ -283,11 +307,11 @@ HTML_TEMPLATE = """
             setTimeout(() => toast.remove(), 1500);
         }
 
-        let lastItemsJson = '';
         let tokenChainFilter = 'ALL';
+        let lastServiceData = {};  // 每个服务的上次数据
         function setTokenChainFilter(chain) {
             tokenChainFilter = chain;
-            lastItemsJson = '';  // 强制刷新
+            lastServiceData['token_service'] = '';  // 强制刷新
             refresh();
         }
 
@@ -312,48 +336,40 @@ HTML_TEMPLATE = """
             });
         }
 
-        // 提取稳定的列表数据用于比较（只比较id，忽略时间戳等动态字段）
-        function getStableItems(services) {
-            return services.map(s => {
-                if (!s.recent) return null;
-                const r = s.recent;
-                // 只提取 id 列表，忽略动态字段
-                if (s.name === 'news_service') {
-                    return { ids: (r.items || []).map(i => i.id), errCount: (r.errors || []).length };
-                } else if (s.name === 'token_service') {
-                    return { ids: (r.items || []).map(i => `${i.chain}:${i.address}`), errCount: (r.errors || []).length };
-                } else if (s.name === 'match_service') {
-                    // 只取 id/content 标识
-                    return {
-                        attemptIds: (r.attempts || []).map(a => `${a.author}:${a.time}`),
-                        matchIds: (r.matches || []).map(m => `${m.author}:${m.time}`),
-                        pendingIds: (r.pending || []).map(p => p.content),
-                        errCount: (r.errors || []).length
-                    };
-                } else if (s.name === 'tracker_service') {
-                    return { ids: (r.records || []).map(rec => rec.id || `${rec.author}:${rec.time}`) };
-                }
-                return null;
-            });
+        // 获取服务的稳定数据（用于比较）
+        function getServiceStableData(s) {
+            if (!s.recent) return null;
+            const r = s.recent;
+            if (s.name === 'news_service') {
+                return { ids: (r.items || []).map(i => i.id), errCount: (r.errors || []).length };
+            } else if (s.name === 'token_service') {
+                return { ids: (r.items || []).map(i => `${i.chain}:${i.address}`), errCount: (r.errors || []).length };
+            }
+            // match_service 和 tracker_service 每次都渲染
+            return Math.random();
         }
 
         function renderServices(services) {
-            // 比较稳定的列表数据
-            const stableItems = getStableItems(services);
-            const newItemsJson = JSON.stringify(stableItems);
-            const needRenderLists = newItemsJson !== lastItemsJson;
-            if (needRenderLists) {
-                lastItemsJson = newItemsJson;
-            }
-
-            // 即使列表没变，也需要更新时间戳显示
+            // 时间戳和时间线始终更新
             updateTimestamps(services);
 
-            // 如果列表没变，不重新渲染DOM
-            if (!needRenderLists) return;
+            // 分别渲染每个服务
+            services.forEach(s => {
+                const container = document.getElementById(`${s.name}_card`);
+                if (!container) return;
 
-            const container = document.getElementById('services');
-            container.innerHTML = services.map(s => {
+                // 只对 news_service 和 token_service 做优化
+                if (s.name === 'news_service' || s.name === 'token_service') {
+                    const stableData = JSON.stringify(getServiceStableData(s));
+                    if (lastServiceData[s.name] === stableData) return;
+                    lastServiceData[s.name] = stableData;
+                }
+
+                container.innerHTML = renderServiceCard(s);
+            });
+        }
+
+        function renderServiceCard(s) {
                 const isOnline = s.status === 'online';
                 const statusClass = isOnline ? 'online' : 'offline';
                 const statusText = isOnline ? '运行中' : '离线';
@@ -577,11 +593,7 @@ HTML_TEMPLATE = """
                                 const pendingInfo = pendingMap[r.content];
                                 let statusBadge;
                                 if (pendingInfo) {
-                                    const now = Math.floor(Date.now() / 1000);
-                                    const remaining = Math.max(0, pendingInfo.expire_time - now);
-                                    const mins = Math.floor(remaining / 60);
-                                    const secs = remaining % 60;
-                                    statusBadge = `<span style="background:#F0B90B;color:#000;padding:2px 6px;border-radius:4px;font-size:10px;margin-left:6px">检测中 ${mins}:${secs.toString().padStart(2,'0')}</span>`;
+                                    statusBadge = `<span class="countdown" data-expire="${pendingInfo.expire_time}" style="background:#F0B90B;color:#000;padding:2px 6px;border-radius:4px;font-size:10px;margin-left:6px">检测中 --:--</span>`;
                                 } else {
                                     statusBadge = `<span style="background:#02c076;color:#fff;padding:2px 6px;border-radius:4px;font-size:10px;margin-left:6px">已完成</span>`;
                                 }
@@ -656,7 +668,6 @@ HTML_TEMPLATE = """
                     <div class="service-stats">${statsHtml}</div>
                     ${dataHtml}
                 </div>`;
-            }).join('');
         }
 
         function renderMatches(data) {
