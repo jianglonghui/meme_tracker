@@ -476,11 +476,47 @@ def send_to_tracker(news_data, keywords, matched_tokens):
         if resp.status_code == 200:
             result = resp.json()
             print(f"[Tracker] 已提交 #{result.get('match_id')}", flush=True)
+            # 推送到 Telegram
+            push_to_telegram(news_data, keywords, matched_tokens)
             return True
     except Exception as e:
         log_error(f"Tracker连接: {e}")
         print(f"[Tracker] 连接失败: {e}", flush=True)
     return False
+
+
+def push_to_telegram(news_data, keywords, matched_tokens):
+    """推送撮合结果到 Telegram"""
+    try:
+        # 提取代币信息（symbol + CA）
+        tokens_info = []
+        for t in matched_tokens[:5]:
+            symbol = t.get('tokenSymbol', '')
+            ca = t.get('tokenAddress', '')
+            if symbol and ca:
+                tokens_info.append({'symbol': symbol, 'ca': ca})
+
+        if not tokens_info:
+            return
+
+        resp = requests.post(
+            'http://127.0.0.1:5060/news_token',
+            json={
+                'author': news_data.get('author', ''),
+                'tweet': news_data.get('content', ''),
+                'keywords': keywords,
+                'tokens': tokens_info
+            },
+            timeout=5,
+            proxies={'http': None, 'https': None}
+        )
+        if resp.status_code == 200:
+            print(f"[Telegram] 已推送: {', '.join(token_symbols)}", flush=True)
+        else:
+            print(f"[Telegram] 推送失败: {resp.status_code}", flush=True)
+    except Exception as e:
+        # 连接失败不报错，tele_bot 可能没启动
+        pass
 
 
 def add_to_pending(news_data, keywords):
@@ -543,7 +579,13 @@ def check_pending_news():
                         symbol = (token.get('tokenSymbol') or '').lower()
                         name = (token.get('tokenName') or '').lower()
 
+                        # 调试：打印窗口内的代币
+                        author = news_data.get('author', '')
+                        print(f"[持续检测] @{author} 窗口内代币: {token.get('tokenSymbol')} (时差: {time_diff/1000:.1f}s)", flush=True)
+                        print(f"[持续检测] 关键词: {keywords}, symbol: {symbol}, name: {name}", flush=True)
+
                         score, matched_kw, match_type = calculate_match_score(keywords, symbol, name)
+                        print(f"[持续检测] 匹配分数: {score}, 匹配词: {matched_kw}", flush=True)
                         if score > 0:
                             pending['matched_token_ids'].add(token_id)
 
@@ -581,6 +623,8 @@ def fetch_token_stream():
                             exists = any(t.get('tokenAddress') == data.get('tokenAddress') for t in token_list)
                             if not exists:
                                 token_list.append(data)
+                                symbol = data.get('tokenSymbol', 'Unknown')
+                                print(f"[代币流] 收到新代币: {symbol} (总计: {len(token_list)})", flush=True)
                                 # 超过上限时移除最旧的
                                 if len(token_list) > MAX_TOKENS:
                                     token_list.pop(0)
@@ -715,7 +759,7 @@ def recent():
     with pending_lock:
         pending = [{
             'author': p['news_data'].get('author', ''),
-            'content': p['news_data'].get('content', '')[:50],
+            'content': p['news_data'].get('content', '')[:100],
             'keywords': p['keywords'][:5] if p['keywords'] else [],
             'matched_count': len(p['matched_token_ids']),
             'expire_time': p['expire_time']

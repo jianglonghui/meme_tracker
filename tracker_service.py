@@ -27,6 +27,8 @@ stats = {
 tracking_tasks = []
 tracking_lock = threading.Lock()
 
+# 错误码: -1=无交易对, -2=HTTP错误, -3=网络异常
+
 
 def init_db():
     """初始化数据库"""
@@ -111,7 +113,7 @@ def init_db():
 
 
 def get_token_current_data(token_address):
-    """从 DexScreener 获取代币数据"""
+    """从 DexScreener 获取代币数据，失败返回错误码"""
     try:
         url = f"{config.DEXSCREENER_API}/{token_address}"
         resp = requests.get(url, timeout=10)
@@ -124,9 +126,17 @@ def get_token_current_data(token_address):
                     'market_cap': float(pair.get('marketCap') or pair.get('fdv') or 0),
                     'price': str(pair.get('priceUsd', '0')),
                 }
+            else:
+                print(f"[DexScreener] {token_address} - 无交易对数据", flush=True)
+                return -1  # 无交易对
+        else:
+            print(f"[DexScreener] {token_address} - HTTP {resp.status_code}", flush=True)
+            return -2  # HTTP错误
     except Exception as e:
+        print(f"[DexScreener] {token_address} - 请求失败: {e}", flush=True)
         stats['errors'] += 1
-    return None
+        return -3  # 网络异常
+    return -1
 
 
 def save_match_record(news_data, keywords, matched_tokens):
@@ -214,25 +224,36 @@ def track_market_cap(matched_token_id, time_offset):
     conn = sqlite3.connect(config.DB_PATH)
     cursor = conn.cursor()
 
-    cursor.execute('SELECT token_address, initial_market_cap FROM matched_tokens WHERE id = ?', (matched_token_id,))
+    cursor.execute('SELECT token_address, token_symbol, initial_market_cap FROM matched_tokens WHERE id = ?', (matched_token_id,))
     row = cursor.fetchone()
     if not row:
+        print(f"[追踪] 错误: 找不到 token_id={matched_token_id}", flush=True)
         conn.close()
         return
 
-    token_address, initial_mc = row
-    current_data = get_token_current_data(token_address)
+    token_address, token_symbol, initial_mc = row
+    result = get_token_current_data(token_address)
 
-    if current_data:
-        current_mc = current_data['market_cap']
+    # 成功返回 dict，失败返回错误码
+    if isinstance(result, dict):
+        current_mc = result['market_cap']
         change_pct = ((current_mc - initial_mc) / initial_mc * 100) if initial_mc > 0 else 0
 
         cursor.execute('''
             INSERT INTO market_cap_tracking (matched_token_id, time_offset, market_cap, market_cap_change_pct, price)
             VALUES (?, ?, ?, ?, ?)
-        ''', (matched_token_id, time_offset, current_mc, change_pct, current_data['price']))
+        ''', (matched_token_id, time_offset, current_mc, change_pct, result['price']))
         conn.commit()
         stats['total_tracked'] += 1
+        print(f"[追踪] {token_symbol} ({time_offset}s) - MC: {current_mc:.0f} ({change_pct:+.1f}%)", flush=True)
+    else:
+        # result 是错误码: -1=无交易对, -2=HTTP错误, -3=网络异常
+        stats['errors'] += 1
+        cursor.execute('''
+            INSERT INTO market_cap_tracking (matched_token_id, time_offset, market_cap, market_cap_change_pct, price)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (matched_token_id, time_offset, result, 0, ''))
+        conn.commit()
 
     conn.close()
 
@@ -411,6 +432,66 @@ def status():
 @app.route('/health')
 def health():
     return jsonify({'status': 'ok'})
+
+
+@app.route('/recent')
+def recent():
+    """返回最近的匹配记录"""
+    conn = sqlite3.connect(config.DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    # 最近10条记录
+    cursor.execute('''
+        SELECT id, news_time, news_author, news_content, keywords, created_at
+        FROM match_records ORDER BY created_at DESC LIMIT 10
+    ''')
+    records = []
+    for row in cursor.fetchall():
+        mid = row['id']
+        # 查询匹配的代币
+        cursor.execute('''
+            SELECT token_symbol, match_keyword FROM matched_tokens
+            WHERE match_id = ? ORDER BY rank LIMIT 3
+        ''', (mid,))
+        tokens = [{'symbol': r['token_symbol'], 'keyword': r['match_keyword']} for r in cursor.fetchall()]
+
+        # 查询追踪状态（成功和失败分开统计）
+        cursor.execute('''
+            SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN market_cap >= 0 THEN 1 ELSE 0 END) as success,
+                MIN(CASE WHEN market_cap < 0 THEN market_cap ELSE NULL END) as error_code
+            FROM market_cap_tracking mct
+            JOIN matched_tokens mt ON mct.matched_token_id = mt.id
+            WHERE mt.match_id = ?
+        ''', (mid,))
+        track_row = cursor.fetchone()
+        track_count = track_row['success'] or 0
+        error_code = track_row['error_code']  # -1=无交易对, -2=HTTP错误, -3=网络异常, None=无错误
+
+        records.append({
+            'id': mid,
+            'time': row['news_time'],
+            'author': row['news_author'],
+            'content': row['news_content'][:50] if row['news_content'] else '',
+            'keywords': json.loads(row['keywords']) if row['keywords'] else [],
+            'tokens': tokens,
+            'track_count': track_count,  # 0=等待, 1-2=追踪中, 3+=完成
+            'error_code': error_code,  # -1=无交易对, -2=HTTP错误, -3=网络异常
+        })
+
+    conn.close()
+
+    # 待处理任务
+    with tracking_lock:
+        pending = [{
+            'match_id': t['match_id'],
+            'time_offset': t['time_offset'],
+            'execute_at': t['execute_at']
+        } for t in tracking_tasks[:10]]
+
+    return jsonify({'records': records, 'pending': pending})
 
 
 # ==================== 最佳实践 API ====================

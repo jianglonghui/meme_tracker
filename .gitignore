@@ -3,3 +3,4 @@ token_tracker.db
 media_cache
 test*
 image_cache
+logs

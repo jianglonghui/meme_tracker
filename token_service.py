@@ -305,6 +305,39 @@ def recent():
     return jsonify({'items': items, 'errors': recent_errors})
 
 
+@app.route('/inject', methods=['POST'])
+def inject():
+    """注入代币到列表中（用于测试撮合）"""
+    from flask import request
+    data = request.json
+    symbol = data.get('symbol', '')
+    name = data.get('name', '')
+    # 支持 ca 和 address 两种参数名
+    address = data.get('ca') or data.get('address') or f'test_{int(time.time())}'
+
+    if not symbol:
+        return jsonify({'success': False, 'error': '代币符号不能为空'}), 400
+
+    # 构造代币数据
+    token = {
+        'tokenAddress': address,
+        'tokenSymbol': symbol.upper(),
+        'tokenName': name or symbol,
+        'createTime': int(time.time() * 1000),
+        'chain': 'TEST',
+        'holders': 100,
+        'marketCap': '10000',
+        'priceChange24h': 0
+    }
+
+    with token_lock:
+        token_dict[address] = token
+        stats['total_tokens'] += 1
+
+    print(f"[注入] 代币: {symbol} ({name or symbol})", flush=True)
+    return jsonify({'success': True, 'token': token})
+
+
 @app.route('/health')
 def health():
     return jsonify({'status': 'ok'})

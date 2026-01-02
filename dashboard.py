@@ -223,6 +223,32 @@ HTML_TEMPLATE = """
             </div>
         </div>
 
+        <!-- 注入代币弹窗 -->
+        <div id="injectTokenModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:1000;justify-content:center;align-items:center">
+            <div style="background:#1e2329;padding:24px;border-radius:8px;width:400px;max-width:90%">
+                <h3 style="margin:0 0 16px 0;color:#eaecef">注入代币</h3>
+                <div style="margin-bottom:12px">
+                    <label style="display:block;color:#848e9c;margin-bottom:4px;font-size:12px">代币符号 *</label>
+                    <input id="injectTokenSymbol" type="text" style="width:100%;background:#2b3139;border:1px solid #363c45;border-radius:4px;padding:8px;color:#eaecef" placeholder="如: DOGE, PEPE">
+                </div>
+                <div style="margin-bottom:12px">
+                    <label style="display:block;color:#848e9c;margin-bottom:4px;font-size:12px">代币名称</label>
+                    <input id="injectTokenName" type="text" style="width:100%;background:#2b3139;border:1px solid #363c45;border-radius:4px;padding:8px;color:#eaecef" placeholder="如: Dogecoin (可选)">
+                </div>
+                <div style="margin-bottom:12px">
+                    <label style="display:block;color:#848e9c;margin-bottom:4px;font-size:12px">合约地址 (CA)</label>
+                    <input id="injectTokenCA" type="text" style="width:100%;background:#2b3139;border:1px solid #363c45;border-radius:4px;padding:8px;color:#eaecef;font-family:monospace;font-size:11px" placeholder="如: 0x... 或 pump地址 (可选)">
+                </div>
+                <div id="injectTokenResult" style="display:none;margin-bottom:12px;padding:12px;background:#2b3139;border-radius:4px">
+                    <div id="injectTokenMsg" style="color:#eaecef"></div>
+                </div>
+                <div style="display:flex;gap:12px;justify-content:flex-end">
+                    <button onclick="closeInjectTokenModal()" style="background:#363c45;color:#eaecef;border:none;padding:8px 16px;border-radius:4px;cursor:pointer">关闭</button>
+                    <button id="injectTokenBtn" onclick="submitInjectToken()" style="background:#F0B90B;color:#000;border:none;padding:8px 16px;border-radius:4px;cursor:pointer">注入</button>
+                </div>
+            </div>
+        </div>
+
         <div class="refresh-info">每 5 秒自动刷新 | <span id="last-update">-</span></div>
     </div>
 
@@ -269,6 +295,43 @@ HTML_TEMPLATE = """
 
                 // 数据列表
                 let dataHtml = '';
+
+                // tracker_service 显示匹配记录
+                if (s.name === 'tracker_service') {
+                    let records = s.recent?.records || [];
+                    dataHtml += `<div class="data-section">
+                        <div class="data-title">📊 匹配记录</div>`;
+                    if (records.length > 0) {
+                        dataHtml += `<div class="data-list">${records.map(r => {
+                            // 追踪状态
+                            let statusBadge;
+                            const errMsgs = {'-1': '无交易对', '-2': 'HTTP错误', '-3': '网络异常'};
+                            if (r.error_code) {
+                                const errMsg = errMsgs[r.error_code] || '未知错误';
+                                statusBadge = `<span style="background:#f6465d;color:#fff;padding:2px 6px;border-radius:4px;font-size:10px">${errMsg}</span>`;
+                            } else if (r.track_count >= 3) {
+                                statusBadge = '<span style="background:#02c076;color:#fff;padding:2px 6px;border-radius:4px;font-size:10px">已完成</span>';
+                            } else if (r.track_count > 0) {
+                                statusBadge = '<span style="background:#F0B90B;color:#000;padding:2px 6px;border-radius:4px;font-size:10px">追踪中</span>';
+                            } else {
+                                statusBadge = '<span style="background:#848e9c;color:#fff;padding:2px 6px;border-radius:4px;font-size:10px">等待</span>';
+                            }
+                            // 代币
+                            let tokensHtml = r.tokens && r.tokens.length > 0
+                                ? r.tokens.map(t => `<span class="symbol">${t.symbol}</span>`).join(', ')
+                                : '<span style="color:#848e9c">无</span>';
+                            return `<div class="data-item">
+                                <div><span class="author">@${r.author}</span> ${statusBadge} <span class="time">${formatTime(r.time)}</span></div>
+                                <div class="content">${r.content || '(无内容)'}</div>
+                                <div style="color:#848e9c;font-size:10px">关键词: ${(r.keywords || []).join(', ') || '无'}</div>
+                                <div style="font-size:10px">匹配代币: ${tokensHtml}</div>
+                            </div>`;
+                        }).join('')}</div>`;
+                    } else {
+                        dataHtml += `<div class="no-data" style="padding:10px;color:#848e9c">暂无记录</div>`;
+                    }
+                    dataHtml += `</div>`;
+                }
                 if (s.recent) {
                     if (s.name === 'news_service') {
                         let items = s.recent.items || [];
@@ -368,15 +431,20 @@ HTML_TEMPLATE = """
                     } else if (s.name === 'token_service') {
                         let items = s.recent.items || [];
                         let errors = s.recent.errors || [];
-                        if (items.length > 0) {
-                            dataHtml += `<div class="data-section">
-                                <div class="data-title">🪙 最近代币</div>
-                                <div class="data-list">${items.map(r => {
-                                    const chainBadge = r.chain === 'SOL' ? '<span style="background:#9945FF;color:#fff;padding:1px 4px;border-radius:3px;font-size:9px;margin-right:4px">SOL</span>' : '<span style="background:#F0B90B;color:#000;padding:1px 4px;border-radius:3px;font-size:9px;margin-right:4px">BSC</span>';
-                                    return `<div class="data-item">${chainBadge}<span class="symbol">${r.symbol}</span> ${r.name} <span class="time">${formatTime(r.time/1000)} | MC:${r.marketCap} H:${r.holders}</span></div>`;
-                                }).join('')}</div>
+                        dataHtml += `<div class="data-section">
+                            <div class="data-title" style="display:flex;justify-content:space-between;align-items:center">
+                                <span>🪙 最近代币</span>
+                                <button onclick="openInjectTokenModal()" style="background:#F0B90B;color:#000;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:10px">注入代币</button>
                             </div>`;
+                        if (items.length > 0) {
+                            dataHtml += `<div class="data-list">${items.map(r => {
+                                    const chainBadge = r.chain === 'SOL' ? '<span style="background:#9945FF;color:#fff;padding:1px 4px;border-radius:3px;font-size:9px;margin-right:4px">SOL</span>' : (r.chain === 'TEST' ? '<span style="background:#848e9c;color:#fff;padding:1px 4px;border-radius:3px;font-size:9px;margin-right:4px">TEST</span>' : '<span style="background:#F0B90B;color:#000;padding:1px 4px;border-radius:3px;font-size:9px;margin-right:4px">BSC</span>');
+                                    return `<div class="data-item">${chainBadge}<span class="symbol">${r.symbol}</span> ${r.name} <span class="time">${formatTime(r.time/1000)} | MC:${r.marketCap} H:${r.holders}</span></div>`;
+                                }).join('')}</div>`;
+                        } else {
+                            dataHtml += `<div class="no-data" style="padding:10px;color:#848e9c">暂无代币</div>`;
                         }
+                        dataHtml += `</div>`;
                         if (errors.length > 0) {
                             const errId = 'err-token-' + Date.now();
                             dataHtml += `<div class="data-section error-section">
@@ -761,6 +829,67 @@ HTML_TEMPLATE = """
             if (e.target === this) closeTestMatchModal();
         });
 
+        // 注入代币弹窗
+        function openInjectTokenModal() {
+            document.getElementById('injectTokenModal').style.display = 'flex';
+            document.getElementById('injectTokenSymbol').value = '';
+            document.getElementById('injectTokenName').value = '';
+            document.getElementById('injectTokenCA').value = '';
+            document.getElementById('injectTokenResult').style.display = 'none';
+            document.getElementById('injectTokenBtn').textContent = '注入';
+        }
+
+        function closeInjectTokenModal() {
+            document.getElementById('injectTokenModal').style.display = 'none';
+        }
+
+        async function submitInjectToken() {
+            const symbol = document.getElementById('injectTokenSymbol').value.trim();
+            const name = document.getElementById('injectTokenName').value.trim();
+            const ca = document.getElementById('injectTokenCA').value.trim();
+
+            if (!symbol) {
+                alert('请输入代币符号');
+                return;
+            }
+
+            const btn = document.getElementById('injectTokenBtn');
+            btn.textContent = '注入中...';
+            btn.disabled = true;
+
+            try {
+                const resp = await fetch('api/inject_token', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ symbol: symbol, name: name, ca: ca })
+                });
+                const data = await resp.json();
+
+                document.getElementById('injectTokenResult').style.display = 'block';
+                if (data.success) {
+                    let msg = '<span style="color:#02c076">代币已注入</span>' +
+                        '<br><span style="color:#848e9c;font-size:11px;margin-top:4px;display:block">符号: ' + data.token.tokenSymbol + '</span>';
+                    if (data.token.tokenAddress) {
+                        msg += '<br><span style="color:#848e9c;font-size:10px;font-family:monospace;word-break:break-all">CA: ' + data.token.tokenAddress + '</span>';
+                    }
+                    document.getElementById('injectTokenMsg').innerHTML = msg;
+                    setTimeout(() => { refresh(); }, 1000);
+                } else {
+                    document.getElementById('injectTokenMsg').innerHTML = '<span style="color:#f6465d">注入失败: ' + (data.error || '未知错误') + '</span>';
+                }
+            } catch (e) {
+                document.getElementById('injectTokenResult').style.display = 'block';
+                document.getElementById('injectTokenMsg').innerHTML = '<span style="color:#f6465d">错误: ' + e.message + '</span>';
+            }
+
+            btn.textContent = '再次注入';
+            btn.disabled = false;
+        }
+
+        document.getElementById('injectTokenModal').addEventListener('click', function(e) {
+            if (e.target === this) closeInjectTokenModal();
+        });
+
         // 启动服务
         async function startService(serviceName) {
             try {
@@ -911,6 +1040,25 @@ def api_extract():
         return jsonify({'keywords': [], 'error': resp.text}), 400
     except Exception as e:
         return jsonify({'keywords': [], 'error': str(e)}), 500
+
+
+@app.route('/api/inject_token', methods=['POST'])
+def api_inject_token():
+    """注入代币到代币发现服务"""
+    from flask import request
+    try:
+        data = request.json
+        resp = requests.post(
+            f'{config.get_service_url("token")}/inject',
+            json=data,
+            timeout=5,
+            proxies={'http': None, 'https': None}
+        )
+        if resp.status_code == 200:
+            return jsonify(resp.json())
+        return jsonify({'success': False, 'error': resp.text}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/start_service', methods=['POST'])
