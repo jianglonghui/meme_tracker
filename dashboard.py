@@ -291,15 +291,23 @@ HTML_TEMPLATE = """
             refresh();
         }
 
-        // 单独更新时间戳显示（不重新渲染DOM）
+        // 单独更新时间戳和时间线（不重新渲染DOM）
         function updateTimestamps(services) {
             services.forEach(s => {
                 const d = s.data || {};
+                // 更新时间戳
                 if (s.name === 'news_service' || s.name === 'token_service') {
                     const lastFetchEl = document.getElementById(`${s.name}-last-fetch`);
                     const lastSuccessEl = document.getElementById(`${s.name}-last-success`);
                     if (lastFetchEl) lastFetchEl.textContent = formatTime(d.last_fetch);
                     if (lastSuccessEl) lastSuccessEl.textContent = formatTime(d.last_success);
+                }
+                // 更新时间线
+                const timelineEl = document.getElementById(`${s.name}-timeline`);
+                if (timelineEl && s.history) {
+                    timelineEl.innerHTML = s.history.map(h =>
+                        `<div class="timeline-bar ${h ? 'online' : 'offline'}" title="${h ? '正常' : '异常'}"></div>`
+                    ).join('');
                 }
             });
         }
@@ -622,7 +630,7 @@ HTML_TEMPLATE = """
                     ).join('');
                     timelineHtml = `<div class="timeline">
                         <span class="timeline-label">5分钟</span>
-                        <div class="timeline-bars">${bars}</div>
+                        <div class="timeline-bars" id="${s.name}-timeline">${bars}</div>
                         <span class="timeline-label">现在</span>
                     </div>`;
                 }
