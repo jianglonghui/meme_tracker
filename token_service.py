@@ -286,9 +286,9 @@ def status():
 def recent():
     """返回最近的代币和错误"""
     with token_lock:
-        # 按创建时间排序，取最新10个
+        # 按创建时间排序，显示全部
         sorted_tokens = sorted(token_dict.values(), key=lambda x: x.get('createTime', 0), reverse=True)
-        recent_items = sorted_tokens[:10]
+        recent_items = sorted_tokens
     with error_lock:
         recent_errors = list(error_log)[::-1]
 

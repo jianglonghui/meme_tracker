@@ -261,18 +261,24 @@ HTML_TEMPLATE = """
             const s = date.getSeconds().toString().padStart(2,'0');
             return `${h}:${m}:${s}`;
         }
+        function escapeHtml(str) {
+            if (!str) return '';
+            return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+        }
 
-        let lastServicesJson = '';
+        let lastRecentJson = '';
         let tokenChainFilter = 'ALL';
         function setTokenChainFilter(chain) {
             tokenChainFilter = chain;
-            lastServicesJson = '';  // 强制刷新
+            lastRecentJson = '';  // 强制刷新
             refresh();
         }
         function renderServices(services) {
-            const newJson = JSON.stringify(services);
-            if (newJson === lastServicesJson) return;
-            lastServicesJson = newJson;
+            // 只比较 recent 数据，忽略时间戳变化
+            const recentData = services.map(s => s.recent);
+            const newJson = JSON.stringify(recentData);
+            if (newJson === lastRecentJson) return;
+            lastRecentJson = newJson;
 
             const container = document.getElementById('services');
             container.innerHTML = services.map(s => {
@@ -510,9 +516,9 @@ HTML_TEMPLATE = """
                                 let windowTokensStr = r.window_tokens && r.window_tokens.length > 0 ? r.window_tokens.join(', ') : '(无)';
                                 return `<div class="data-item">
                                     <div><span class="author">@${r.author}</span> ${matchStatus} ${statusBadge} <span class="time">${formatTime(r.time)}</span></div>
-                                    <div class="content">${r.content}</div>
-                                    <div style="color:#848e9c;font-size:10px">关键词: ${keywordsStr}</div>
-                                    <div style="color:#848e9c;font-size:10px">窗口代币(${r.tokens_in_window}): ${windowTokensStr}</div>
+                                    <div class="content">${escapeHtml(r.content)}</div>
+                                    <div style="color:#848e9c;font-size:10px">关键词: ${escapeHtml(keywordsStr)}</div>
+                                    <div style="color:#848e9c;font-size:10px">窗口代币(${r.tokens_in_window}): ${escapeHtml(windowTokensStr)}</div>
                                 </div>`;
                             }).join('')}</div>`;
                         } else {
