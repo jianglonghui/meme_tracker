@@ -27,6 +27,59 @@ SEEN_EVENTS_FILE = os.path.join(os.path.dirname(__file__), 'seen_events.json')
 app = Flask(__name__)
 
 
+# ==================== 黑名单管理 ====================
+def load_blacklist():
+    """加载黑名单"""
+    try:
+        if os.path.exists(config.BLACKLIST_FILE):
+            with open(config.BLACKLIST_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"[黑名单] 加载失败: {e}", flush=True)
+    return []
+
+
+def save_blacklist(blacklist):
+    """保存黑名单"""
+    try:
+        with open(config.BLACKLIST_FILE, 'w', encoding='utf-8') as f:
+            json.dump(blacklist, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"[黑名单] 保存失败: {e}", flush=True)
+        return False
+
+
+def add_to_blacklist(token_name):
+    """添加到黑名单"""
+    blacklist = load_blacklist()
+    token_name = token_name.strip().lower()
+    if token_name and token_name not in blacklist:
+        blacklist.append(token_name)
+        save_blacklist(blacklist)
+        return True
+    return False
+
+
+def remove_from_blacklist(token_name):
+    """从黑名单移除"""
+    blacklist = load_blacklist()
+    token_name = token_name.strip().lower()
+    if token_name in blacklist:
+        blacklist.remove(token_name)
+        save_blacklist(blacklist)
+        return True
+    return False
+
+
+def build_blacklist_prompt():
+    """构建黑名单提示词"""
+    blacklist = load_blacklist()
+    if not blacklist:
+        return ""
+    return f"\n\n黑名单（绝对禁止返回这些词）：{', '.join(blacklist)}"
+
+
 def search_binance_tokens(keyword):
     """
     使用 Binance API 搜索优质代币
@@ -228,7 +281,7 @@ def build_examples_prompt():
     examples = "\n\n最佳实践示例："
     for i, p in enumerate(practices[:5], 1):
         keywords_str = ', '.join(p['keywords'])
-        examples += f"\n示例{i}: 推文「{p['tweet_content'][:50]}...」→ 关键词: [{keywords_str}] → 匹配代币: {p['best_token']}"
+        examples += f"\n示例{i}: 推文「{p['tweet_content']}」→ 关键词: [{keywords_str}] → 匹配代币: {p['best_token']}"
 
     return examples
 
@@ -239,6 +292,8 @@ def call_deepseek(news_content):
         return []
 
     examples = build_examples_prompt()
+
+    blacklist_prompt = build_blacklist_prompt()
 
     prompt = f"""作为meme币分析师，从推文中提取最可能被用作代币名称的关键词。
 
@@ -258,7 +313,7 @@ def call_deepseek(news_content):
 - 通用技术词汇（blockchain、gas、node等）
 - 年份数字（如2026）
 - 链接、@用户名、冠词介词
-{examples}
+{examples}{blacklist_prompt}
 
 推文：{news_content}
 
@@ -357,6 +412,7 @@ def call_gemini_vision(news_content, image_paths=None):
         client = genai.Client(api_key=config.GEMINI_API_KEY)
 
         examples = build_examples_prompt()
+        blacklist_prompt = build_blacklist_prompt()
 
         content_section = f"推文内容：{news_content}" if news_content else "（纯图片推文，无文字内容）"
 
@@ -380,7 +436,7 @@ def call_gemini_vision(news_content, image_paths=None):
 - 已存在的主流币名（BTC、ETH、SOL等）
 - 通用技术词汇（blockchain、gas、node等）
 - 链接、@用户名、冠词介词
-{examples}
+{examples}{blacklist_prompt}
 
 {content_section}
 
@@ -971,6 +1027,102 @@ def test_search():
             'min_liquidity': config.SEARCH_MIN_LIQUIDITY,
             'min_age_days': config.SEARCH_MIN_AGE_SECONDS / 86400
         }
+    })
+
+
+# ==================== 黑名单 API ====================
+@app.route('/blacklist', methods=['GET'])
+def get_blacklist():
+    """获取黑名单列表"""
+    return jsonify({'blacklist': load_blacklist()})
+
+
+@app.route('/blacklist', methods=['POST'])
+def api_add_blacklist():
+    """添加到黑名单"""
+    from flask import request
+    data = request.get_json()
+    token_name = data.get('token_name', '')
+    if not token_name:
+        return jsonify({'success': False, 'error': '代币名称不能为空'}), 400
+    success = add_to_blacklist(token_name)
+    return jsonify({'success': success, 'blacklist': load_blacklist()})
+
+
+@app.route('/blacklist', methods=['DELETE'])
+def api_remove_blacklist():
+    """从黑名单移除"""
+    from flask import request
+    data = request.get_json()
+    token_name = data.get('token_name', '')
+    if not token_name:
+        return jsonify({'success': False, 'error': '代币名称不能为空'}), 400
+    success = remove_from_blacklist(token_name)
+    return jsonify({'success': success, 'blacklist': load_blacklist()})
+
+
+# ==================== 提示词模版 API ====================
+@app.route('/prompt_template', methods=['GET'])
+def get_prompt_template():
+    """获取当前完整提示词模版"""
+    examples = build_examples_prompt()
+    blacklist_prompt = build_blacklist_prompt()
+
+    deepseek_prompt = f"""作为meme币分析师，从推文中提取最可能被用作代币名称的关键词。
+
+提取原则：
+- 最多返回3个关键词，按meme币潜力从高到低排序
+- 只提取推文原文中的词，不翻译不推断
+- 中文短语保持完整
+
+优先级排序（从高到低）：
+1. 亚文化符号/梗词（如milady、pepe、doge等有社区认同的词）
+2. 情绪词/口号（如"我踏马来了"、"LFG"、"WAGMI"）
+3. 人名/昵称（推文中提到的人物）
+4. 特殊名词/新造词
+
+排除：
+- 已存在的主流币名（BTC、ETH、SOL等）
+- 通用技术词汇（blockchain、gas、node等）
+- 年份数字（如2026）
+- 链接、@用户名、冠词介词
+{examples}{blacklist_prompt}
+
+推文：{{推文内容}}
+
+返回JSON数组（最多3个，按潜力排序）："""
+
+    gemini_prompt = f"""作为meme币分析师，从推文内容和图片中提取最可能被用作代币名称的关键词。
+
+提取原则：
+- 最多返回3个关键词，按meme币潜力从高到低排序
+- 从文字和图片中都提取关键词
+- 如果图片中有文字/标语/符号，优先提取
+- 中文短语保持完整
+
+优先级排序（从高到低）：
+1. 亚文化符号/梗词（如milady、pepe、doge等有社区认同的词）
+2. 图片中的文字、标语、符号名称
+3. 情绪词/口号（如"我踏马来了"、"LFG"、"WAGMI"）
+4. 人名/昵称（推文中提到的人物）
+5. 特殊名词/新造词
+6. 年份数字（如2026）
+
+排除：
+- 已存在的主流币名（BTC、ETH、SOL等）
+- 通用技术词汇（blockchain、gas、node等）
+- 链接、@用户名、冠词介词
+{examples}{blacklist_prompt}
+
+推文内容：{{推文内容}}
+
+返回JSON数组（最多3个，按潜力排序）："""
+
+    return jsonify({
+        'deepseek': deepseek_prompt,
+        'gemini': gemini_prompt,
+        'blacklist': load_blacklist(),
+        'examples_count': len(get_best_practices())
     })
 
 

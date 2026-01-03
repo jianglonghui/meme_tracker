@@ -257,6 +257,42 @@ HTML_TEMPLATE = """
             </div>
         </div>
 
+        <!-- 黑名单管理弹窗 -->
+        <div id="blacklistModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:1000;justify-content:center;align-items:center">
+            <div style="background:#1e2329;padding:24px;border-radius:8px;width:450px;max-width:90%">
+                <h3 style="margin:0 0 16px 0;color:#f6465d">🚫 代币黑名单</h3>
+                <p style="color:#848e9c;font-size:12px;margin-bottom:12px">添加到黑名单的代币名称将不会被AI提取为关键词</p>
+                <div style="margin-bottom:12px;display:flex;gap:8px">
+                    <input id="blacklistInput" type="text" style="flex:1;background:#2b3139;border:1px solid #363c45;border-radius:4px;padding:8px;color:#eaecef" placeholder="输入代币名称，如: pepe, doge">
+                    <button onclick="addToBlacklist()" style="background:#f6465d;color:#fff;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;white-space:nowrap">添加</button>
+                </div>
+                <div id="blacklistList" style="max-height:300px;overflow-y:auto;background:#0b0e11;border-radius:4px;padding:8px">
+                    <div style="color:#848e9c;text-align:center;padding:20px">加载中...</div>
+                </div>
+                <div style="display:flex;gap:12px;justify-content:flex-end;margin-top:16px">
+                    <button onclick="closeBlacklistModal()" style="background:#363c45;color:#eaecef;border:none;padding:8px 16px;border-radius:4px;cursor:pointer">关闭</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 提示词查看弹窗 -->
+        <div id="promptModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:1000;justify-content:center;align-items:center">
+            <div style="background:#1e2329;padding:24px;border-radius:8px;width:700px;max-width:95%;max-height:90vh;overflow-y:auto">
+                <h3 style="margin:0 0 16px 0;color:#eaecef">📝 当前提示词模版</h3>
+                <div style="margin-bottom:16px">
+                    <div style="display:flex;gap:8px;margin-bottom:8px">
+                        <button id="promptTabDeepseek" onclick="switchPromptTab('deepseek')" style="background:#F0B90B;color:#000;border:none;padding:6px 12px;border-radius:4px;cursor:pointer;font-size:12px">DeepSeek (纯文本)</button>
+                        <button id="promptTabGemini" onclick="switchPromptTab('gemini')" style="background:#363c45;color:#eaecef;border:none;padding:6px 12px;border-radius:4px;cursor:pointer;font-size:12px">Gemini (图片+文本)</button>
+                    </div>
+                    <pre id="promptContent" style="background:#0b0e11;border-radius:4px;padding:12px;color:#b7bdc6;font-size:11px;white-space:pre-wrap;word-break:break-all;max-height:400px;overflow-y:auto;line-height:1.5">加载中...</pre>
+                </div>
+                <div id="promptStats" style="color:#848e9c;font-size:11px;margin-bottom:12px"></div>
+                <div style="display:flex;gap:12px;justify-content:flex-end">
+                    <button onclick="closePromptModal()" style="background:#363c45;color:#eaecef;border:none;padding:8px 16px;border-radius:4px;cursor:pointer">关闭</button>
+                </div>
+            </div>
+        </div>
+
         <div class="refresh-info">每 5 秒自动刷新 | <span id="last-update">-</span></div>
     </div>
 
@@ -651,11 +687,15 @@ HTML_TEMPLATE = """
                         // 构建 pending 查找表
                         const pendingMap = {};
                         pendingList.forEach(p => { pendingMap[p.content] = p; });
-                        // 测试撮合按钮
+                        // 测试撮合按钮 + 黑名单 + 提示词按钮
                         dataHtml += `<div class="data-section">
                             <div class="data-title" style="display:flex;justify-content:space-between;align-items:center">
                                 <span>🔍 撮合尝试</span>
-                                <button onclick="openTestMatchModal()" style="background:#F0B90B;color:#000;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:10px">测试撮合</button>
+                                <div style="display:flex;gap:4px">
+                                    <button onclick="openBlacklistModal()" style="background:#f6465d;color:#fff;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:10px">黑名单</button>
+                                    <button onclick="openPromptModal()" style="background:#848e9c;color:#fff;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:10px">提示词</button>
+                                    <button onclick="openTestMatchModal()" style="background:#F0B90B;color:#000;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:10px">测试撮合</button>
+                                </div>
                             </div>`;
                         if (attemptList.length > 0) {
                             dataHtml += `<div class="data-list">${attemptList.map(r => {
@@ -1083,6 +1123,142 @@ HTML_TEMPLATE = """
             if (e.target === this) closeInjectTokenModal();
         });
 
+        // 黑名单弹窗
+        let currentBlacklist = [];
+
+        function openBlacklistModal() {
+            document.getElementById('blacklistModal').style.display = 'flex';
+            document.getElementById('blacklistInput').value = '';
+            loadBlacklist();
+        }
+
+        function closeBlacklistModal() {
+            document.getElementById('blacklistModal').style.display = 'none';
+        }
+
+        async function loadBlacklist() {
+            try {
+                const resp = await fetch('api/blacklist');
+                const data = await resp.json();
+                currentBlacklist = data.blacklist || [];
+                renderBlacklist();
+            } catch (e) {
+                document.getElementById('blacklistList').innerHTML =
+                    '<div style="color:#f6465d;text-align:center;padding:20px">加载失败: ' + e.message + '</div>';
+            }
+        }
+
+        function renderBlacklist() {
+            const container = document.getElementById('blacklistList');
+            if (currentBlacklist.length === 0) {
+                container.innerHTML = '<div style="color:#848e9c;text-align:center;padding:20px">暂无黑名单</div>';
+                return;
+            }
+            container.innerHTML = currentBlacklist.map(name =>
+                `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px;border-bottom:1px solid #2b3139">
+                    <span style="color:#eaecef">${name}</span>
+                    <button onclick="removeFromBlacklist('${name}')" style="background:#f6465d;color:#fff;border:none;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:10px">删除</button>
+                </div>`
+            ).join('');
+        }
+
+        async function addToBlacklist() {
+            const input = document.getElementById('blacklistInput');
+            const tokenName = input.value.trim();
+            if (!tokenName) {
+                alert('请输入代币名称');
+                return;
+            }
+
+            try {
+                const resp = await fetch('api/blacklist', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ token_name: tokenName })
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    currentBlacklist = data.blacklist || [];
+                    renderBlacklist();
+                    input.value = '';
+                } else {
+                    alert('添加失败: ' + (data.error || '未知错误'));
+                }
+            } catch (e) {
+                alert('添加失败: ' + e.message);
+            }
+        }
+
+        async function removeFromBlacklist(tokenName) {
+            try {
+                const resp = await fetch('api/blacklist', {
+                    method: 'DELETE',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ token_name: tokenName })
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    currentBlacklist = data.blacklist || [];
+                    renderBlacklist();
+                } else {
+                    alert('删除失败: ' + (data.error || '未知错误'));
+                }
+            } catch (e) {
+                alert('删除失败: ' + e.message);
+            }
+        }
+
+        document.getElementById('blacklistModal').addEventListener('click', function(e) {
+            if (e.target === this) closeBlacklistModal();
+        });
+
+        // 提示词弹窗
+        let promptData = null;
+        let currentPromptTab = 'deepseek';
+
+        function openPromptModal() {
+            document.getElementById('promptModal').style.display = 'flex';
+            loadPromptTemplate();
+        }
+
+        function closePromptModal() {
+            document.getElementById('promptModal').style.display = 'none';
+        }
+
+        async function loadPromptTemplate() {
+            try {
+                const resp = await fetch('api/prompt_template');
+                promptData = await resp.json();
+                renderPromptContent();
+            } catch (e) {
+                document.getElementById('promptContent').textContent = '加载失败: ' + e.message;
+            }
+        }
+
+        function switchPromptTab(tab) {
+            currentPromptTab = tab;
+            document.getElementById('promptTabDeepseek').style.background = tab === 'deepseek' ? '#F0B90B' : '#363c45';
+            document.getElementById('promptTabDeepseek').style.color = tab === 'deepseek' ? '#000' : '#eaecef';
+            document.getElementById('promptTabGemini').style.background = tab === 'gemini' ? '#F0B90B' : '#363c45';
+            document.getElementById('promptTabGemini').style.color = tab === 'gemini' ? '#000' : '#eaecef';
+            renderPromptContent();
+        }
+
+        function renderPromptContent() {
+            if (!promptData) return;
+            const content = currentPromptTab === 'deepseek' ? promptData.deepseek : promptData.gemini;
+            document.getElementById('promptContent').textContent = content;
+
+            const blacklistCount = promptData.blacklist ? promptData.blacklist.length : 0;
+            const examplesCount = promptData.examples_count || 0;
+            document.getElementById('promptStats').innerHTML =
+                `最佳实践样例: <span style="color:#0ecb81">${examplesCount}</span> 条 | 黑名单: <span style="color:#f6465d">${blacklistCount}</span> 个`;
+        }
+
+        document.getElementById('promptModal').addEventListener('click', function(e) {
+            if (e.target === this) closePromptModal();
+        });
+
         // 启动服务
         async function startService(serviceName) {
             try {
@@ -1270,6 +1446,74 @@ def api_delete_records():
         return jsonify({'success': False, 'error': resp.text}), 400
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/blacklist', methods=['GET'])
+def api_get_blacklist():
+    """获取黑名单"""
+    try:
+        resp = requests.get(
+            f'{config.get_service_url("match")}/blacklist',
+            timeout=5,
+            proxies={'http': None, 'https': None}
+        )
+        if resp.status_code == 200:
+            return jsonify(resp.json())
+        return jsonify({'blacklist': [], 'error': resp.text}), 400
+    except Exception as e:
+        return jsonify({'blacklist': [], 'error': str(e)}), 500
+
+
+@app.route('/api/blacklist', methods=['POST'])
+def api_add_blacklist():
+    """添加到黑名单"""
+    try:
+        data = request.json
+        resp = requests.post(
+            f'{config.get_service_url("match")}/blacklist',
+            json=data,
+            timeout=5,
+            proxies={'http': None, 'https': None}
+        )
+        if resp.status_code == 200:
+            return jsonify(resp.json())
+        return jsonify({'success': False, 'error': resp.text}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/blacklist', methods=['DELETE'])
+def api_remove_blacklist():
+    """从黑名单移除"""
+    try:
+        data = request.json
+        resp = requests.delete(
+            f'{config.get_service_url("match")}/blacklist',
+            json=data,
+            timeout=5,
+            proxies={'http': None, 'https': None}
+        )
+        if resp.status_code == 200:
+            return jsonify(resp.json())
+        return jsonify({'success': False, 'error': resp.text}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/prompt_template', methods=['GET'])
+def api_prompt_template():
+    """获取提示词模版"""
+    try:
+        resp = requests.get(
+            f'{config.get_service_url("match")}/prompt_template',
+            timeout=5,
+            proxies={'http': None, 'https': None}
+        )
+        if resp.status_code == 200:
+            return jsonify(resp.json())
+        return jsonify({'error': resp.text}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/start_service', methods=['POST'])
