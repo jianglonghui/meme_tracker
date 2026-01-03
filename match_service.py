@@ -77,7 +77,61 @@ def build_blacklist_prompt():
     blacklist = load_blacklist()
     if not blacklist:
         return ""
-    return f"\n\n黑名单（绝对禁止返回这些词）：{', '.join(blacklist)}"
+    return f" 黑名单（绝对禁止返回这些词）：{', '.join(blacklist)}"
+
+
+# ==================== 提示词模板 ====================
+DEEPSEEK_PROMPT_TEMPLATE = """作为meme币分析师，从推文中提取最可能被用作代币名称的关键词。
+
+提取原则：
+- 最多返回3个关键词，按meme币潜力从高到低排序
+- 只提取推文原文中的词，不翻译不推断
+- 中文短语保持完整
+
+优先级排序（从高到低）：
+1. 亚文化符号/梗词（如milady、pepe、doge等有社区认同的词）
+2. 情绪词/口号（如"我踏马来了"、"LFG"、"WAGMI"）
+3. 人名/昵称（推文中提到的人物）
+4. 特殊名词/新造词
+
+排除：
+- 已存在的主流币名（BTC、ETH、SOL等）
+- 通用技术词汇（blockchain、gas、node等）
+- 年份数字（如2026）
+- 链接、@用户名、冠词介词
+- {blacklist_prompt}
+{examples}
+
+推文：{news_content}
+
+返回JSON数组（最多3个，按潜力排序）："""
+
+GEMINI_PROMPT_TEMPLATE = """作为meme币分析师，从推文内容和图片中提取最可能被用作代币名称的关键词。
+
+提取原则：
+- 最多返回3个关键词，按meme币潜力从高到低排序
+- 从文字和图片中都提取关键词
+- 如果图片中有文字/标语/符号，优先提取
+- 中文短语保持完整
+
+优先级排序（从高到低）：
+1. 亚文化符号/梗词（如milady、pepe、doge等有社区认同的词）
+2. 图片中的文字、标语、符号名称
+3. 情绪词/口号（如"我踏马来了"、"LFG"、"WAGMI"）
+4. 人名/昵称（推文中提到的人物）
+5. 特殊名词/新造词
+
+排除：
+- 已存在的主流币名（BTC、ETH、SOL等）
+- 通用技术词汇（blockchain、gas、node等）
+- 链接、@用户名、冠词介词
+- 年份（如2025，2026）
+- {blacklist_prompt}
+{examples}
+
+{content_section}
+
+返回JSON数组（最多3个，按潜力排序）："""
 
 
 def search_binance_tokens(keyword):
@@ -281,7 +335,7 @@ def build_examples_prompt():
     examples = "\n\n最佳实践示例："
     for i, p in enumerate(practices[:5], 1):
         keywords_str = ', '.join(p['keywords'])
-        examples += f"\n示例{i}: 推文「{p['tweet_content']}」→ 关键词: [{keywords_str}] → 匹配代币: {p['best_token']}"
+        examples += f"\n示例{i}: 推文「{p['tweet_content']}」→ 关键词: {p['best_token']}"
 
     return examples
 
@@ -292,32 +346,13 @@ def call_deepseek(news_content):
         return []
 
     examples = build_examples_prompt()
-
     blacklist_prompt = build_blacklist_prompt()
 
-    prompt = f"""作为meme币分析师，从推文中提取最可能被用作代币名称的关键词。
-
-提取原则：
-- 最多返回3个关键词，按meme币潜力从高到低排序
-- 只提取推文原文中的词，不翻译不推断
-- 中文短语保持完整
-
-优先级排序（从高到低）：
-1. 亚文化符号/梗词（如milady、pepe、doge等有社区认同的词）
-2. 情绪词/口号（如"我踏马来了"、"LFG"、"WAGMI"）
-3. 人名/昵称（推文中提到的人物）
-4. 特殊名词/新造词
-
-排除：
-- 已存在的主流币名（BTC、ETH、SOL等）
-- 通用技术词汇（blockchain、gas、node等）
-- 年份数字（如2026）
-- 链接、@用户名、冠词介词
-{examples}{blacklist_prompt}
-
-推文：{news_content}
-
-返回JSON数组（最多3个，按潜力排序）："""
+    prompt = DEEPSEEK_PROMPT_TEMPLATE.format(
+        blacklist_prompt=blacklist_prompt,
+        examples=examples,
+        news_content=news_content
+    )
 
     try:
         headers = {
@@ -325,12 +360,11 @@ def call_deepseek(news_content):
             "Content-Type": "application/json"
         }
         payload = {
-            "model": "deepseek-chat",
+            "model": "deepseek-reasoner",
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.3,
-            "max_tokens": 200
+            "max_tokens": 1024
         }
-        resp = requests.post(config.DEEPSEEK_API_URL, headers=headers, json=payload, timeout=10)
+        resp = requests.post(config.DEEPSEEK_API_URL, headers=headers, json=payload, timeout=30)
         if resp.status_code == 200:
             result = resp.json()
             content = result['choices'][0]['message']['content'].strip()
@@ -413,34 +447,13 @@ def call_gemini_vision(news_content, image_paths=None):
 
         examples = build_examples_prompt()
         blacklist_prompt = build_blacklist_prompt()
-
         content_section = f"推文内容：{news_content}" if news_content else "（纯图片推文，无文字内容）"
 
-        prompt = f"""作为meme币分析师，从推文内容和图片中提取最可能被用作代币名称的关键词。
-
-提取原则：
-- 最多返回3个关键词，按meme币潜力从高到低排序
-- 从文字和图片中都提取关键词
-- 如果图片中有文字/标语/符号，优先提取
-- 中文短语保持完整
-
-优先级排序（从高到低）：
-1. 亚文化符号/梗词（如milady、pepe、doge等有社区认同的词）
-2. 图片中的文字、标语、符号名称
-3. 情绪词/口号（如"我踏马来了"、"LFG"、"WAGMI"）
-4. 人名/昵称（推文中提到的人物）
-5. 特殊名词/新造词
-6. 年份数字（如2026）
-
-排除：
-- 已存在的主流币名（BTC、ETH、SOL等）
-- 通用技术词汇（blockchain、gas、node等）
-- 链接、@用户名、冠词介词
-{examples}{blacklist_prompt}
-
-{content_section}
-
-返回JSON数组（最多3个，按潜力排序）："""
+        prompt = GEMINI_PROMPT_TEMPLATE.format(
+            blacklist_prompt=blacklist_prompt,
+            examples=examples,
+            content_section=content_section
+        )
 
         # 构建 parts
         parts = [types.Part.from_text(text=prompt)]
@@ -464,7 +477,7 @@ def call_gemini_vision(news_content, image_paths=None):
         contents = [types.Content(role="user", parts=parts)]
 
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-3-flash-preview",
             contents=contents,
         )
 
@@ -496,23 +509,24 @@ def call_gemini_vision(news_content, image_paths=None):
 
 
 def extract_keywords(content, image_urls=None):
-    """提取关键词：有图片时使用 Gemini，否则使用 DeepSeek"""
-    # 如果有图片且配置了 Gemini，优先使用 Gemini
-    if image_urls and config.GEMINI_API_KEY:
-        # 获取缓存的图片（优先使用 dashboard 已下载的）
+    """提取关键词：默认使用 Gemini，失败时回退到 DeepSeek"""
+    # 默认使用 Gemini
+    if config.GEMINI_API_KEY:
         image_paths = []
-        for url in image_urls[:3]:
-            path = get_cached_image(url)
-            if path:
-                image_paths.append(path)
+        if image_urls:
+            for url in image_urls[:3]:
+                path = get_cached_image(url)
+                if path:
+                    image_paths.append(path)
+            if image_paths:
+                print(f"[Gemini] 处理 {len(image_paths)} 张图片...", flush=True)
 
-        if image_paths:
-            print(f"[Gemini] 处理 {len(image_paths)} 张图片...", flush=True)
-            keywords = call_gemini_vision(content, image_paths)
-            if keywords:
-                return keywords, 'gemini'
+        keywords = call_gemini_vision(content, image_paths if image_paths else None)
+        if keywords:
+            return keywords, 'gemini'
+        print("[Gemini] 未提取到关键词，回退到 DeepSeek", flush=True)
 
-    # 回退到 DeepSeek（纯文本）
+    # Gemini 失败时回退到 DeepSeek
     keywords = call_deepseek(content)
     return keywords, 'deepseek'
 
@@ -1068,55 +1082,17 @@ def get_prompt_template():
     examples = build_examples_prompt()
     blacklist_prompt = build_blacklist_prompt()
 
-    deepseek_prompt = f"""作为meme币分析师，从推文中提取最可能被用作代币名称的关键词。
+    deepseek_prompt = DEEPSEEK_PROMPT_TEMPLATE.format(
+        blacklist_prompt=blacklist_prompt,
+        examples=examples,
+        news_content="{推文内容}"
+    )
 
-提取原则：
-- 最多返回3个关键词，按meme币潜力从高到低排序
-- 只提取推文原文中的词，不翻译不推断
-- 中文短语保持完整
-
-优先级排序（从高到低）：
-1. 亚文化符号/梗词（如milady、pepe、doge等有社区认同的词）
-2. 情绪词/口号（如"我踏马来了"、"LFG"、"WAGMI"）
-3. 人名/昵称（推文中提到的人物）
-4. 特殊名词/新造词
-
-排除：
-- 已存在的主流币名（BTC、ETH、SOL等）
-- 通用技术词汇（blockchain、gas、node等）
-- 年份数字（如2026）
-- 链接、@用户名、冠词介词
-{examples}{blacklist_prompt}
-
-推文：{{推文内容}}
-
-返回JSON数组（最多3个，按潜力排序）："""
-
-    gemini_prompt = f"""作为meme币分析师，从推文内容和图片中提取最可能被用作代币名称的关键词。
-
-提取原则：
-- 最多返回3个关键词，按meme币潜力从高到低排序
-- 从文字和图片中都提取关键词
-- 如果图片中有文字/标语/符号，优先提取
-- 中文短语保持完整
-
-优先级排序（从高到低）：
-1. 亚文化符号/梗词（如milady、pepe、doge等有社区认同的词）
-2. 图片中的文字、标语、符号名称
-3. 情绪词/口号（如"我踏马来了"、"LFG"、"WAGMI"）
-4. 人名/昵称（推文中提到的人物）
-5. 特殊名词/新造词
-6. 年份数字（如2026）
-
-排除：
-- 已存在的主流币名（BTC、ETH、SOL等）
-- 通用技术词汇（blockchain、gas、node等）
-- 链接、@用户名、冠词介词
-{examples}{blacklist_prompt}
-
-推文内容：{{推文内容}}
-
-返回JSON数组（最多3个，按潜力排序）："""
+    gemini_prompt = GEMINI_PROMPT_TEMPLATE.format(
+        blacklist_prompt=blacklist_prompt,
+        examples=examples,
+        content_section="推文内容：{推文内容}"
+    )
 
     return jsonify({
         'deepseek': deepseek_prompt,
