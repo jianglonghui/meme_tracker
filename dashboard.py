@@ -349,6 +349,8 @@ HTML_TEMPLATE = """
         }
 
         let tokenChainFilter = 'ALL';
+        let showExclusive = false;  // 是否显示优质代币
+        let exclusiveTokens = [];   // 优质代币缓存
         let lastServiceData = {};  // 每个服务的上次数据
         let deleteMode = false;  // 删除模式
         let selectedIds = new Set();  // 选中的记录ID
@@ -357,6 +359,26 @@ HTML_TEMPLATE = """
             tokenChainFilter = chain;
             lastServiceData['token_service'] = '';  // 强制刷新
             refresh();
+        }
+
+        async function toggleExclusiveMode() {
+            showExclusive = !showExclusive;
+            if (showExclusive && exclusiveTokens.length === 0) {
+                await loadExclusiveTokens();
+            }
+            lastServiceData['token_service'] = '';  // 强制刷新
+            refresh();
+        }
+
+        async function loadExclusiveTokens() {
+            try {
+                const resp = await fetch('api/exclusive');
+                const data = await resp.json();
+                exclusiveTokens = data.items || [];
+            } catch (e) {
+                console.error('加载优质代币失败:', e);
+                exclusiveTokens = [];
+            }
         }
 
         function toggleDeleteMode() {
@@ -640,31 +662,36 @@ HTML_TEMPLATE = """
                             </div>`;
                         }
                     } else if (s.name === 'token_service') {
-                        let items = s.recent.items || [];
+                        let items = showExclusive ? exclusiveTokens : (s.recent.items || []);
                         let errors = s.recent.errors || [];
-                        // 根据选中的链过滤
-                        const filteredItems = tokenChainFilter === 'ALL' ? items : items.filter(r => r.chain === tokenChainFilter);
+                        // 根据选中的链过滤（仅在非优质模式下）
+                        const filteredItems = showExclusive ? items : (tokenChainFilter === 'ALL' ? items : items.filter(r => r.chain === tokenChainFilter));
+                        const titleText = showExclusive ? '⭐ 优质代币' : '🪙 最近代币';
                         dataHtml += `<div class="data-section">
                             <div class="data-title" style="display:flex;justify-content:space-between;align-items:center">
                                 <div style="display:flex;align-items:center;gap:8px">
-                                    <span>🪙 最近代币</span>
-                                    <div style="display:flex;gap:2px">
+                                    <span>${titleText}</span>
+                                    ${!showExclusive ? `<div style="display:flex;gap:2px">
                                         <button onclick="setTokenChainFilter('ALL')" style="background:${tokenChainFilter==='ALL'?'#F0B90B':'#363c45'};color:${tokenChainFilter==='ALL'?'#000':'#eaecef'};border:none;padding:2px 6px;border-radius:3px;cursor:pointer;font-size:9px">全部</button>
                                         <button onclick="setTokenChainFilter('BSC')" style="background:${tokenChainFilter==='BSC'?'#F0B90B':'#363c45'};color:${tokenChainFilter==='BSC'?'#000':'#eaecef'};border:none;padding:2px 6px;border-radius:3px;cursor:pointer;font-size:9px">BSC</button>
                                         <button onclick="setTokenChainFilter('SOL')" style="background:${tokenChainFilter==='SOL'?'#9945FF':'#363c45'};color:#fff;border:none;padding:2px 6px;border-radius:3px;cursor:pointer;font-size:9px">SOL</button>
-                                    </div>
+                                    </div>` : ''}
                                 </div>
-                                <button onclick="openInjectTokenModal()" style="background:#F0B90B;color:#000;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:10px">注入代币</button>
+                                <div style="display:flex;gap:4px">
+                                    <button onclick="toggleExclusiveMode()" style="background:${showExclusive?'#02c076':'#363c45'};color:#fff;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:10px">${showExclusive?'返回':'优质'}</button>
+                                    ${!showExclusive ? `<button onclick="openInjectTokenModal()" style="background:#F0B90B;color:#000;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:10px">注入代币</button>` : ''}
+                                </div>
                             </div>`;
                         if (filteredItems.length > 0) {
                             dataHtml += `<div class="data-list">${filteredItems.map(r => {
                                     const chainBadge = r.chain === 'SOL' ? '<span style="background:#9945FF;color:#fff;padding:1px 4px;border-radius:3px;font-size:9px;margin-right:4px">SOL</span>' : (r.chain === 'TEST' ? '<span style="background:#848e9c;color:#fff;padding:1px 4px;border-radius:3px;font-size:9px;margin-right:4px">TEST</span>' : '<span style="background:#F0B90B;color:#000;padding:1px 4px;border-radius:3px;font-size:9px;margin-right:4px">BSC</span>');
                                     const shortCa = r.address ? (r.address.length > 16 ? r.address.slice(0,8) + '...' + r.address.slice(-6) : r.address) : '';
                                     const caHtml = shortCa ? `<span style="color:#848e9c;font-size:9px;font-family:monospace;margin-left:6px;cursor:pointer" title="点击复制: ${r.address}" onclick="copyText('${r.address}')">${shortCa}</span>` : '';
-                                    return `<div class="data-item">${chainBadge}<span class="symbol" style="cursor:pointer" title="点击复制" onclick="copyText('${r.symbol}')">${r.symbol}</span> ${r.name}${caHtml} <span class="time">${formatTime(r.time/1000)} | MC:${r.marketCap} H:${r.holders}</span></div>`;
+                                    const extraInfo = showExclusive && r.priceChange24h ? ` <span style="color:${r.priceChange24h>=0?'#02c076':'#f6465d'}">${r.priceChange24h>=0?'+':''}${(r.priceChange24h*100).toFixed(1)}%</span>` : '';
+                                    return `<div class="data-item">${chainBadge}<span class="symbol" style="cursor:pointer" title="点击复制" onclick="copyText('${r.symbol}')">${r.symbol}</span> ${r.name}${caHtml} <span class="time">${formatTime(r.time/1000)} | MC:${r.marketCap} H:${r.holders}${extraInfo}</span></div>`;
                                 }).join('')}</div>`;
                         } else {
-                            dataHtml += `<div class="no-data" style="padding:10px;color:#848e9c">暂无代币</div>`;
+                            dataHtml += `<div class="no-data" style="padding:10px;color:#848e9c">${showExclusive ? '加载中...' : '暂无代币'}</div>`;
                         }
                         dataHtml += `</div>`;
                         if (errors.length > 0) {
@@ -1428,6 +1455,22 @@ def api_inject_token():
         return jsonify({'success': False, 'error': resp.text}), 400
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/exclusive')
+def api_exclusive():
+    """获取优质代币列表"""
+    try:
+        resp = requests.get(
+            f'{config.get_service_url("token")}/exclusive',
+            timeout=10,
+            proxies={'http': None, 'https': None}
+        )
+        if resp.status_code == 200:
+            return jsonify(resp.json())
+        return jsonify({'items': [], 'error': resp.text}), 400
+    except Exception as e:
+        return jsonify({'items': [], 'error': str(e)}), 500
 
 
 @app.route('/api/delete_records', methods=['POST'])

@@ -120,6 +120,27 @@ def init_db():
         )
     ''')
 
+    # 全量推文记录表
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS all_news (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            news_time INTEGER,
+            news_author TEXT,
+            news_author_name TEXT,
+            news_avatar TEXT,
+            news_type TEXT,
+            news_content TEXT,
+            news_images TEXT,
+            news_videos TEXT,
+            ref_author TEXT,
+            ref_author_name TEXT,
+            ref_avatar TEXT,
+            ref_content TEXT,
+            ref_images TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
     conn.commit()
     conn.close()
     print("[DB] 数据库初始化完成", flush=True)

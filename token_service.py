@@ -343,6 +343,49 @@ def health():
     return jsonify({'status': 'ok'})
 
 
+@app.route('/exclusive')
+def exclusive():
+    """获取 Binance 优质代币列表"""
+    try:
+        headers = {
+            'accept': '*/*',
+            'content-type': 'application/json',
+            'clienttype': 'web',
+            'lang': 'en',
+            'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+        }
+        resp = requests.get(
+            'https://web3.binance.com/bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/pulse/exclusive/rank/list?chainId=56',
+            headers=headers,
+            proxies=config.PROXIES,
+            timeout=10
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            tokens = data.get('data', {}).get('tokens', []) or []
+            items = []
+            for t in tokens:
+                meta = t.get('metaInfo', {}) or {}
+                items.append({
+                    'address': t.get('contractAddress', ''),
+                    'symbol': t.get('symbol', ''),
+                    'name': meta.get('name', '') or t.get('symbol', ''),
+                    'chain': 'BSC',
+                    'marketCap': t.get('marketCap', 0),
+                    'holders': t.get('holders', 0),
+                    'time': t.get('createTime', 0),
+                    'priceChange24h': float(t.get('percentChange', 0) or 0) / 100,  # 转为小数
+                    'volume24h': t.get('volume', 0)
+                })
+            return jsonify({'items': items})
+        else:
+            log_error(f"Binance exclusive API HTTP {resp.status_code}")
+            return jsonify({'items': [], 'error': f'HTTP {resp.status_code}'}), 400
+    except Exception as e:
+        log_error(f"Binance exclusive API: {e}")
+        return jsonify({'items': [], 'error': str(e)}), 500
+
+
 if __name__ == "__main__":
     port = config.get_port('token')
     print(f"代币发现服务启动: http://127.0.0.1:{port}", flush=True)

@@ -5,3 +5,5 @@ test*
 image_cache
 logs
 CLAUDE.md
+
+seen_events.json

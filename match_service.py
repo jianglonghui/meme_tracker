@@ -10,6 +10,8 @@ import threading
 import time
 import os
 import hashlib
+import sqlite3
+import atexit
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, jsonify
 import config
@@ -23,6 +25,10 @@ os.makedirs(MEDIA_CACHE_DIR, exist_ok=True)
 
 # 已处理推文缓存文件
 SEEN_EVENTS_FILE = os.path.join(os.path.dirname(__file__), 'seen_events.json')
+
+# 推文缓存（满10条批量写入数据库）
+news_buffer = []
+NEWS_BUFFER_SIZE = 10
 
 app = Flask(__name__)
 
@@ -134,6 +140,119 @@ GEMINI_PROMPT_TEMPLATE = """作为meme币分析师，从推文内容和图片中
 返回JSON数组（最多3个，按潜力排序）："""
 
 
+# 优质代币缓存
+exclusive_tokens_cache = []
+
+
+def refresh_exclusive_tokens():
+    """刷新优质代币缓存"""
+    global exclusive_tokens_cache
+    try:
+        headers = {
+            'accept': '*/*',
+            'content-type': 'application/json',
+            'clienttype': 'web',
+            'lang': 'en',
+            'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+        }
+        resp = requests.get(
+            'https://web3.binance.com/bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/pulse/exclusive/rank/list?chainId=56',
+            headers=headers,
+            proxies=config.PROXIES,
+            timeout=10
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            tokens = data.get('data', {}).get('tokens', []) or []
+            result = []
+            for t in tokens:
+                meta = t.get('metaInfo', {}) or {}
+                result.append({
+                    'address': t.get('contractAddress', ''),
+                    'symbol': t.get('symbol', ''),
+                    'name': meta.get('name', '') or t.get('symbol', ''),
+                    'chain': 'BSC',
+                    'marketCap': float(t.get('marketCap', 0) or 0),
+                    'holders': int(t.get('holders', 0) or 0),
+                    'liquidity': float(t.get('liquidity', 0) or 0),
+                    'price': t.get('price', 0),
+                    'source': 'exclusive'
+                })
+            exclusive_tokens_cache = result
+            print(f"[优质代币] 刷新缓存 {len(result)} 个", flush=True)
+    except Exception as e:
+        print(f"[优质代币] 刷新失败: {e}", flush=True)
+
+
+def exclusive_tokens_updater():
+    """后台线程：每60秒刷新优质代币缓存"""
+    while stats['running']:
+        refresh_exclusive_tokens()
+        time.sleep(60)
+
+
+def get_exclusive_tokens():
+    """获取优质代币列表（直接返回缓存）"""
+    return exclusive_tokens_cache
+
+
+def match_exclusive_with_ai(keywords):
+    """用 AI 判断关键词和优质代币的匹配关系"""
+    tokens = get_exclusive_tokens()
+    if not tokens or not keywords:
+        return []
+
+    # 构建代币列表字符串
+    token_list = [f"{i+1}. {t['symbol']} ({t['name']})" for i, t in enumerate(tokens[:30])]
+    token_str = "\n".join(token_list)
+    keywords_str = ", ".join(keywords)
+
+    prompt = f"""判断以下关键词是否与代币列表中的某个代币相关。
+
+关键词: {keywords_str}
+
+代币列表:
+{token_str}
+
+规则:
+- 关键词必须与代币名称或符号有明确关联（包含、谐音、缩写等）
+- 如果有匹配，返回代币序号（如 "1" 或 "3"）
+- 如果多个匹配，返回最相关的一个序号
+- 如果没有任何匹配，返回 "none"
+
+只返回序号或 "none"，不要其他内容："""
+
+    try:
+        # 使用 Gemini
+        if config.GEMINI_API_KEY:
+            from google import genai
+            client = genai.Client(api_key=config.GEMINI_API_KEY)
+            response = client.models.generate_content(
+                model="gemini-2.0-flash-lite",
+                contents=prompt,
+            )
+            result = response.text.strip().lower()
+
+            if result == 'none' or not result:
+                print(f"[AI匹配] 关键词 {keywords_str} 无匹配", flush=True)
+                return []
+
+            # 解析序号
+            try:
+                idx = int(result.replace('.', '').strip()) - 1
+                if 0 <= idx < len(tokens):
+                    matched_token = tokens[idx]
+                    print(f"[AI匹配] 关键词 {keywords_str} -> {matched_token['symbol']}", flush=True)
+                    return [matched_token]
+            except:
+                pass
+
+    except Exception as e:
+        print(f"[AI匹配] 异常: {e}", flush=True)
+
+    return []
+
+
 def search_binance_tokens(keyword):
     """
     使用 Binance API 搜索优质代币
@@ -219,6 +338,53 @@ def save_seen_events(seen_events):
             json.dump(seen_events, f)
     except Exception as e:
         print(f"保存 seen_events 失败: {e}", flush=True)
+
+
+def buffer_news(news_data):
+    """缓存推文，满10条批量写入数据库"""
+    news_buffer.append(news_data)
+    if len(news_buffer) >= NEWS_BUFFER_SIZE:
+        flush_news_buffer()
+
+
+def flush_news_buffer():
+    """将缓存的推文写入数据库"""
+    global news_buffer
+    if not news_buffer:
+        return
+
+    try:
+        conn = sqlite3.connect(config.DB_PATH)
+        cursor = conn.cursor()
+        for news in news_buffer:
+            cursor.execute('''
+                INSERT INTO all_news (
+                    news_time, news_author, news_author_name, news_avatar, news_type,
+                    news_content, news_images, news_videos,
+                    ref_author, ref_author_name, ref_avatar, ref_content, ref_images
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                news.get('time'),
+                news.get('author'),
+                news.get('authorName'),
+                news.get('avatar'),
+                news.get('type'),
+                news.get('content'),
+                json.dumps(news.get('images', [])),
+                json.dumps(news.get('videos', [])),
+                news.get('refAuthor'),
+                news.get('refAuthorName'),
+                news.get('refAvatar'),
+                news.get('refContent'),
+                json.dumps(news.get('refImages', []))
+            ))
+        conn.commit()
+        conn.close()
+        print(f"[全量记录] 写入 {len(news_buffer)} 条推文", flush=True)
+        news_buffer = []
+    except Exception as e:
+        print(f"[全量记录] 写入失败: {e}", flush=True)
+
 
 # 状态统计
 stats = {
@@ -835,29 +1001,19 @@ def process_news_item(news_data, full_content, all_images):
                 add_to_pending(news_data, keywords, matched_ids)
 
         def search_and_send_old():
-            """搜索老币，计算匹配分数，达标后推送"""
-            search_tokens = []
-            for kw in keywords[:3]:
-                search_result = search_binance_tokens(kw)
-                for token in search_result:
-                    if any(t.get('address') == token['address'] for t in search_tokens):
-                        continue
-                    # 计算匹配分数
-                    symbol = (token.get('symbol') or '').lower()
-                    name = (token.get('name') or '').lower()
-                    score, matched_kw, match_type = calculate_match_score(keywords, symbol, name)
-                    # 只保留达到最小分数的代币
-                    if score >= config.MIN_MATCH_SCORE:
-                        token['_match_score'] = score
-                        token['_matched_keyword'] = matched_kw
-                        token['_match_type'] = match_type
-                        search_tokens.append(token)
+            """在优质代币中搜索匹配，用 AI 判断"""
+            matched_tokens = match_exclusive_with_ai(keywords)
 
-            if search_tokens:
+            if matched_tokens:
                 stats['total_matches'] += 1
                 stats['last_match'] = time.time()
-                print(f"[老币] @{author}: {len(search_tokens)} 个 ({', '.join(t['symbol'] for t in search_tokens[:3])})", flush=True)
-                # 转换格式后发送（包含匹配分数）
+                print(f"[优质匹配] @{author}: {len(matched_tokens)} 个 ({', '.join(t['symbol'] for t in matched_tokens)})", flush=True)
+                # 更新 attempt 显示
+                token_names = [t['symbol'] for t in matched_tokens]
+                update_attempt(content, len(matched_tokens), len(matched_tokens), token_names)
+                # log_match 需要 tokenSymbol 字段
+                log_match(author, content, [{'tokenSymbol': t['symbol']} for t in matched_tokens])
+                # 转换格式后发送
                 formatted = [{
                     'tokenAddress': t['address'],
                     'tokenSymbol': t['symbol'],
@@ -865,11 +1021,11 @@ def process_news_item(news_data, full_content, all_images):
                     'chain': t['chain'],
                     'marketCap': t['marketCap'],
                     'liquidity': t.get('liquidity', 0),
-                    'source': 'binance_search',
-                    '_match_score': t.get('_match_score', 0),
-                    '_matched_keyword': t.get('_matched_keyword', ''),
-                    '_match_type': t.get('_match_type', '')
-                } for t in search_tokens]
+                    'source': 'exclusive',
+                    '_match_score': 5.0,  # AI 匹配给高分
+                    '_matched_keyword': ', '.join(keywords),
+                    '_match_type': 'ai_match'
+                } for t in matched_tokens]
                 send_to_tracker(news_data, keywords, formatted)
 
         # 并行执行，不等待
@@ -929,6 +1085,9 @@ def fetch_news_stream():
                             'refContent': data.get('refContent', ''),
                             'refImages': data.get('refImages', []) or [],
                         }
+
+                        # 记录到全量推文表
+                        buffer_news(news_data)
 
                         # 检查推文时间，超过1小时的跳过
                         current_time_ms = int(time.time() * 1000)
@@ -1023,7 +1182,7 @@ def test_extract_keywords():
 
 @app.route('/search', methods=['POST'])
 def test_search():
-    """测试 Binance 代币搜索"""
+    """测试优质代币 AI 匹配"""
     from flask import request
     data = request.get_json()
     keyword = data.get('keyword', '')
@@ -1031,16 +1190,13 @@ def test_search():
     if not keyword:
         return jsonify({'error': '关键词不能为空'}), 400
 
-    tokens = search_binance_tokens(keyword)
+    # 使用 AI 匹配优质代币
+    tokens = match_exclusive_with_ai([keyword])
     return jsonify({
         'keyword': keyword,
         'count': len(tokens),
         'tokens': tokens,
-        'filter': {
-            'min_mcap': config.SEARCH_MIN_MCAP,
-            'min_liquidity': config.SEARCH_MIN_LIQUIDITY,
-            'min_age_days': config.SEARCH_MIN_AGE_SECONDS / 86400
-        }
+        'method': 'ai_exclusive_match'
     })
 
 
@@ -1105,6 +1261,13 @@ def get_prompt_template():
 if __name__ == "__main__":
     print(f"代币撮合服务启动: http://127.0.0.1:{config.get_port('match')}", flush=True)
     print(f"等待 news_service ({config.get_port('news')}) 和 token_service ({config.get_port('token')})...", flush=True)
+
+    # 程序退出时刷新剩余的推文缓存
+    atexit.register(flush_news_buffer)
+
+    # 启动优质代币缓存刷新线程
+    exclusive_thread = threading.Thread(target=exclusive_tokens_updater, daemon=True)
+    exclusive_thread.start()
 
     # 启动代币流监听
     token_thread = threading.Thread(target=fetch_token_stream, daemon=True)
