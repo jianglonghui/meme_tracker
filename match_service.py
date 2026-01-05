@@ -815,11 +815,27 @@ def push_to_telegram(news_data, keywords, matched_tokens):
         if not tokens_info:
             return
 
+        token_symbols = [t['symbol'] for t in tokens_info]
+
         resp = requests.post(
             'http://127.0.0.1:5060/news_token',
             json={
+                # 推文作者信息
                 'author': news_data.get('author', ''),
+                'authorName': news_data.get('authorName', ''),
+                'avatar': news_data.get('avatar', ''),
+                # 推文内容
+                'type': news_data.get('type', ''),
                 'tweet': news_data.get('content', ''),
+                'images': news_data.get('images', []),
+                'videos': news_data.get('videos', []),
+                # 引用推文信息
+                'refAuthor': news_data.get('refAuthor', ''),
+                'refAuthorName': news_data.get('refAuthorName', ''),
+                'refAvatar': news_data.get('refAvatar', ''),
+                'refContent': news_data.get('refContent', ''),
+                'refImages': news_data.get('refImages', []),
+                # 撮合结果
                 'keywords': keywords,
                 'tokens': tokens_info
             },
