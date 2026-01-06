@@ -242,7 +242,9 @@ def get_exclusive_tokens():
 
 
 def match_exclusive_with_ai(keywords):
-    """用硬编码规则优先匹配，匹配不到才用 AI 判断"""
+    """硬编码和AI并行匹配，优先使用硬编码结果"""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     all_tokens = get_exclusive_tokens()
     if not all_tokens or not keywords:
         return []
@@ -260,37 +262,38 @@ def match_exclusive_with_ai(keywords):
     keywords_str = ", ".join(keywords)
     keywords_lower = [kw.lower() for kw in keywords if kw]
 
-    # ========== 优先：硬编码匹配 ==========
-    best_match = None
-    best_score = 0
-    best_keyword = None
-    best_type = None
+    def do_hardcoded_match():
+        """硬编码匹配"""
+        best_match = None
+        best_score = 0
+        best_keyword = None
+        best_type = None
 
-    for token in tokens[:30]:
-        symbol = (token.get('symbol') or '').lower()
-        name = (token.get('name') or '').lower()
-        score, matched_kw, match_type = calculate_match_score(keywords_lower, symbol, name)
-        if score > best_score:
-            best_score = score
-            best_match = token
-            best_keyword = matched_kw
-            best_type = match_type
+        for token in tokens[:30]:
+            symbol = (token.get('symbol') or '').lower()
+            name = (token.get('name') or '').lower()
+            score, matched_kw, match_type = calculate_match_score(keywords_lower, symbol, name)
+            if score > best_score:
+                best_score = score
+                best_match = token
+                best_keyword = matched_kw
+                best_type = match_type
 
-    # 硬编码匹配成功（分数 >= 1.5 表示至少有字符串包含关系）
-    if best_match and best_score >= 1.5:
-        print(f"[硬编码匹配] 关键词 {keywords_str} -> {best_match['symbol']} ({best_match['name']}) 分数:{best_score} 类型:{best_type}", flush=True)
-        matched = best_match.copy()
-        matched['_match_score'] = best_score
-        matched['_matched_keyword'] = best_keyword
-        matched['_match_type'] = best_type
-        return [matched]
+        # 分数 >= 1.5 表示至少有字符串包含关系
+        if best_match and best_score >= 1.5:
+            matched = best_match.copy()
+            matched['_match_score'] = best_score
+            matched['_matched_keyword'] = best_keyword
+            matched['_match_type'] = best_type
+            return [matched]
+        return []
 
-    # ========== 回退：AI 匹配 ==========
-    # 构建代币列表字符串（包含 symbol 和 name）
-    token_list = [f"{i+1}. symbol:{t['symbol']} name:{t['name']}" for i, t in enumerate(tokens[:30])]
-    token_str = "\n".join(token_list)
+    def do_ai_match():
+        """AI匹配"""
+        token_list = [f"{i+1}. symbol:{t['symbol']} name:{t['name']}" for i, t in enumerate(tokens[:30])]
+        token_str = "\n".join(token_list)
 
-    prompt = f"""判断以下关键词是否与代币列表中的某个代币相关。
+        prompt = f"""判断以下关键词是否与代币列表中的某个代币相关。
 
 关键词: {keywords_str}
 
@@ -305,37 +308,58 @@ def match_exclusive_with_ai(keywords):
 
 只返回序号或 "none"，不要其他内容："""
 
-    try:
-        # 使用 Gemini
-        if config.GEMINI_API_KEY:
-            from google import genai
-            client = genai.Client(api_key=config.GEMINI_API_KEY)
-            response = client.models.generate_content(
-                model="gemini-2.0-flash-lite",
-                contents=prompt,
-            )
-            result = response.text.strip().lower()
+        try:
+            if config.GEMINI_API_KEY:
+                from google import genai
+                client = genai.Client(api_key=config.GEMINI_API_KEY)
+                response = client.models.generate_content(
+                    model="gemini-2.0-flash-lite",
+                    contents=prompt,
+                )
+                result = response.text.strip().lower()
 
-            if result == 'none' or not result:
-                print(f"[AI匹配] 关键词 {keywords_str} 无匹配", flush=True)
-                return []
+                if result == 'none' or not result:
+                    return []
 
-            # 解析序号
-            try:
-                idx = int(result.replace('.', '').strip()) - 1
-                if 0 <= idx < len(tokens):
-                    matched_token = tokens[idx].copy()
-                    matched_token['_match_score'] = 5.0
-                    matched_token['_matched_keyword'] = keywords_str
-                    matched_token['_match_type'] = 'ai_match'
-                    print(f"[AI匹配] 关键词 {keywords_str} -> {matched_token['symbol']} ({matched_token['name']})", flush=True)
-                    return [matched_token]
-            except:
-                pass
+                try:
+                    idx = int(result.replace('.', '').strip()) - 1
+                    if 0 <= idx < len(tokens):
+                        matched_token = tokens[idx].copy()
+                        matched_token['_match_score'] = 5.0
+                        matched_token['_matched_keyword'] = keywords_str
+                        matched_token['_match_type'] = 'ai_match'
+                        return [matched_token]
+                except:
+                    pass
+        except Exception as e:
+            print(f"[AI匹配] 异常: {e}", flush=True)
+        return []
 
-    except Exception as e:
-        print(f"[AI匹配] 异常: {e}", flush=True)
+    # 并行执行硬编码和AI匹配
+    hardcoded_result = []
+    ai_result = []
 
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        future_hardcoded = pool.submit(do_hardcoded_match)
+        future_ai = pool.submit(do_ai_match)
+
+        # 等待两个任务完成
+        hardcoded_result = future_hardcoded.result()
+        ai_result = future_ai.result()
+
+    # 优先返回硬编码结果
+    if hardcoded_result:
+        t = hardcoded_result[0]
+        print(f"[硬编码匹配] 关键词 {keywords_str} -> {t['symbol']} ({t['name']}) 分数:{t['_match_score']} 类型:{t['_match_type']}", flush=True)
+        return hardcoded_result
+
+    # 硬编码无结果时返回AI结果
+    if ai_result:
+        t = ai_result[0]
+        print(f"[AI匹配] 关键词 {keywords_str} -> {t['symbol']} ({t['name']})", flush=True)
+        return ai_result
+
+    print(f"[匹配] 关键词 {keywords_str} 无匹配", flush=True)
     return []
 
 
@@ -824,15 +848,17 @@ def calculate_match_score(keywords, symbol, name):
 
 
 def match_tokens(news_time, keywords):
-    """匹配时间窗口内的代币，返回 (匹配列表, 窗口内代币数, 窗口内代币名称列表)"""
+    """匹配时间窗口内的代币，硬编码和AI并行，优先硬编码结果"""
+    from concurrent.futures import ThreadPoolExecutor
+
     if not news_time:
         return [], 0, []
 
     news_time_ms = news_time * 1000
-    matched = []
-    tokens_in_window = 0
+    window_tokens = []
     window_token_names = []
 
+    # 先获取时间窗口内的代币列表
     with token_lock:
         for token in token_list:
             create_time = token.get('createTime', 0)
@@ -841,25 +867,109 @@ def match_tokens(news_time, keywords):
 
             time_diff = abs(create_time - news_time_ms)
             if time_diff <= config.TIME_WINDOW_MS:
-                tokens_in_window += 1
-                symbol = (token.get('tokenSymbol') or '').lower()
-                name = (token.get('tokenName') or '').lower()
+                window_tokens.append(token)
                 window_token_names.append(token.get('tokenSymbol') or token.get('tokenName') or 'Unknown')
 
-                if keywords:
-                    score, matched_kw, match_type = calculate_match_score(keywords, symbol, name)
-                    # 新币只看匹配分数，追踪后看涨幅
-                    if score >= config.MIN_MATCH_SCORE:
-                        token_copy = token.copy()
-                        token_copy['_match_score'] = score
-                        token_copy['_matched_keyword'] = matched_kw
-                        token_copy['_match_type'] = match_type
-                        holders = float(token.get('holders', 0) or 0)
-                        token_copy['_final_score'] = score * holders
-                        matched.append(token_copy)
+    tokens_in_window = len(window_tokens)
+    if not window_tokens or not keywords:
+        return [], tokens_in_window, window_token_names
 
-    matched.sort(key=lambda x: x.get('_final_score', 0), reverse=True)
-    return matched, tokens_in_window, window_token_names
+    keywords_lower = [kw.lower() for kw in keywords if kw]
+    keywords_str = ", ".join(keywords)
+
+    def do_hardcoded_match():
+        """硬编码匹配"""
+        matched = []
+        for token in window_tokens:
+            symbol = (token.get('tokenSymbol') or '').lower()
+            name = (token.get('tokenName') or '').lower()
+            score, matched_kw, match_type = calculate_match_score(keywords_lower, symbol, name)
+            if score >= config.MIN_MATCH_SCORE:
+                token_copy = token.copy()
+                token_copy['_match_score'] = score
+                token_copy['_matched_keyword'] = matched_kw
+                token_copy['_match_type'] = match_type
+                holders = float(token.get('holders', 0) or 0)
+                token_copy['_final_score'] = score * holders
+                matched.append(token_copy)
+        matched.sort(key=lambda x: x.get('_final_score', 0), reverse=True)
+        return matched
+
+    def do_ai_match():
+        """AI匹配新币"""
+        if not window_tokens:
+            return []
+
+        token_list_str = [f"{i+1}. symbol:{t.get('tokenSymbol','')} name:{t.get('tokenName','')}" for i, t in enumerate(window_tokens[:30])]
+        token_str = "\n".join(token_list_str)
+
+        prompt = f"""判断以下关键词是否与代币列表中的某个代币相关。
+
+关键词: {keywords_str}
+
+代币列表:
+{token_str}
+
+规则:
+- 关键词需要与代币的 symbol 或 name 有明确关联（包含、谐音、缩写等）
+- 如果有匹配，返回代币序号（如 "1" 或 "3"）
+- 如果多个匹配，返回最相关的一个序号
+- 如果没有任何匹配，返回 "none"
+
+只返回序号或 "none"，不要其他内容："""
+
+        try:
+            if config.GEMINI_API_KEY:
+                from google import genai
+                client = genai.Client(api_key=config.GEMINI_API_KEY)
+                response = client.models.generate_content(
+                    model="gemini-2.0-flash-lite",
+                    contents=prompt,
+                )
+                result = response.text.strip().lower()
+
+                if result == 'none' or not result:
+                    return []
+
+                try:
+                    idx = int(result.replace('.', '').strip()) - 1
+                    if 0 <= idx < len(window_tokens):
+                        token_copy = window_tokens[idx].copy()
+                        token_copy['_match_score'] = 5.0
+                        token_copy['_matched_keyword'] = keywords_str
+                        token_copy['_match_type'] = 'ai_match'
+                        holders = float(token_copy.get('holders', 0) or 0)
+                        token_copy['_final_score'] = 5.0 * holders
+                        return [token_copy]
+                except:
+                    pass
+        except Exception as e:
+            print(f"[新币AI匹配] 异常: {e}", flush=True)
+        return []
+
+    # 并行执行硬编码和AI匹配
+    hardcoded_result = []
+    ai_result = []
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        future_hardcoded = pool.submit(do_hardcoded_match)
+        future_ai = pool.submit(do_ai_match)
+
+        hardcoded_result = future_hardcoded.result()
+        ai_result = future_ai.result()
+
+    # 优先返回硬编码结果
+    if hardcoded_result:
+        print(f"[新币硬编码] 关键词 {keywords_str} 匹配到 {len(hardcoded_result)} 个", flush=True)
+        return hardcoded_result, tokens_in_window, window_token_names
+
+    # 硬编码无结果时返回AI结果
+    if ai_result:
+        t = ai_result[0]
+        print(f"[新币AI匹配] 关键词 {keywords_str} -> {t.get('tokenSymbol')} ({t.get('tokenName')})", flush=True)
+        return ai_result, tokens_in_window, window_token_names
+
+    return [], tokens_in_window, window_token_names
 
 
 def send_to_tracker(news_data, keywords, matched_tokens):
