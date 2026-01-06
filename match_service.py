@@ -281,8 +281,8 @@ def match_exclusive_with_ai(tweet_text):
                 score = 5.0
                 match_type = "推文包含symbol"
                 matched_word = symbol
-            # 检查 name 是否在推文中（至少3字符）
-            elif name and len(name) >= 3 and name in tweet_lower:
+            # 检查 name 是否在推文中（至少2字符，支持中文）
+            elif name and len(name) >= 2 and name in tweet_lower:
                 score = 4.0
                 match_type = "推文包含name"
                 matched_word = name
@@ -924,8 +924,8 @@ def match_tokens(news_time, tweet_text):
                 score = 5.0
                 match_type = "推文包含symbol"
                 matched_word = symbol
-            # 检查 name 是否在推文中（至少3字符）
-            elif score == 0 and name and len(name) >= 3 and name in tweet_lower:
+            # 检查 name 是否在推文中（至少2字符，支持中文）
+            elif score == 0 and name and len(name) >= 2 and name in tweet_lower:
                 score = 4.0
                 match_type = "推文包含name"
                 matched_word = name
@@ -1193,7 +1193,7 @@ def check_pending_news():
                             score = 5.0
                             match_type = "推文包含symbol"
                             matched_word = symbol
-                        elif score == 0 and name and len(name) >= 3 and name in tweet_lower:
+                        elif score == 0 and name and len(name) >= 2 and name in tweet_lower:
                             score = 4.0
                             match_type = "推文包含name"
                             matched_word = name
