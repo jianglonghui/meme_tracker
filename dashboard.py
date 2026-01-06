@@ -737,10 +737,20 @@ HTML_TEMPLATE = """
                                 </div>`;
                             }).join('');
 
-                            // 最后检查数据
-                            const lastCheckHtml = c.last_check_elapsed > 0
-                                ? `<div style="font-size:10px;color:#848e9c;margin-top:3px">📊 最后检查: <span style="color:#F0B90B">${c.last_check_elapsed}s</span> · <span style="color:#02c076">${formatMcap(c.last_check_mcap)}</span></div>`
-                                : '';
+                            // 最后检查数据（含涨跌幅）
+                            let lastCheckHtml = '';
+                            if (c.last_check_elapsed > 0) {
+                                const firstMcap = c.first_market_cap || 0;
+                                const lastMcap = c.last_check_mcap || 0;
+                                let changeStr = '';
+                                if (firstMcap > 0 && lastMcap > 0) {
+                                    const changeRatio = ((lastMcap - firstMcap) / firstMcap * 100);
+                                    const changeColor = changeRatio >= 0 ? '#02c076' : '#f6465d';
+                                    const sign = changeRatio >= 0 ? '+' : '';
+                                    changeStr = ` <span style="color:${changeColor}">(${sign}${changeRatio.toFixed(1)}%)</span>`;
+                                }
+                                lastCheckHtml = `<div style="font-size:10px;color:#848e9c;margin-top:3px">📊 最后检查: <span style="color:#F0B90B">${c.last_check_elapsed}s</span> · <span style="color:#02c076">${formatMcap(lastMcap)}</span>${changeStr}</div>`;
+                            }
 
                             return `<div class="data-item" style="padding:6px 0;border-bottom:1px solid #2b3139">
                                 <div style="display:flex;justify-content:space-between;align-items:center">

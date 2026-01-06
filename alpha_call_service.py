@@ -315,6 +315,10 @@ def api_recent():
             last_check_mcap = row['last_check_mcap'] or 0
         except:
             last_check_mcap = 0
+        # 获取首次 call 的市值
+        calls_list = calls_by_contract.get(addr, [])
+        first_mcap = calls_list[-1]['market_cap'] if calls_list else 0  # calls 按时间倒序，最后一个是最早的
+
         contract_stats.append({
             'address': addr,
             'symbol': row['symbol'] or '',
@@ -324,9 +328,10 @@ def api_recent():
             'first_time': row['first_call_time'],
             'last_time': row['last_call_time'],
             'market_cap': last_mcap,
+            'first_market_cap': first_mcap,
             'last_check_elapsed': last_check_elapsed,
             'last_check_mcap': last_check_mcap,
-            'calls': calls_by_contract.get(addr, [])  # 每次调用的详情
+            'calls': calls_list  # 每次调用的详情
         })
 
     return jsonify({
