@@ -24,6 +24,7 @@ status_history = {
     'token_service': deque(maxlen=MAX_HISTORY),
     'tracker_service': deque(maxlen=MAX_HISTORY),
     'match_service': deque(maxlen=MAX_HISTORY),
+    'alpha_call_service': deque(maxlen=MAX_HISTORY),
 }
 # 上一次的 errors 计数
 last_errors = {
@@ -31,6 +32,7 @@ last_errors = {
     'token_service': 0,
     'tracker_service': 0,
     'match_service': 0,
+    'alpha_call_service': 0,
 }
 
 def get_services():
@@ -40,6 +42,7 @@ def get_services():
         {'name': 'token_service', 'url': config.get_service_url('token'), 'desc': '代币发现', 'port': config.get_port('token')},
         {'name': 'tracker_service', 'url': config.get_service_url('tracker'), 'desc': '代币跟踪', 'port': config.get_port('tracker')},
         {'name': 'match_service', 'url': config.get_service_url('match'), 'desc': '代币撮合', 'port': config.get_port('match')},
+        {'name': 'alpha_call_service', 'url': config.get_service_url('alpha_call'), 'desc': 'Alpha Call', 'port': config.get_port('alpha_call')},
     ]
 
 HTML_TEMPLATE = """
@@ -146,8 +149,11 @@ HTML_TEMPLATE = """
         <div class="services">
             <div id="news_service_card"></div>
             <div id="token_service_card"></div>
-            <div id="tracker_service_card"></div>
             <div id="match_service_card"></div>
+            <div style="display:grid;grid-template-rows:1fr 1fr;gap:15px">
+                <div id="tracker_service_card"></div>
+                <div id="alpha_call_service_card"></div>
+            </div>
         </div>
 
         <h2 style="display:flex;justify-content:space-between;align-items:center">
@@ -275,6 +281,24 @@ HTML_TEMPLATE = """
             </div>
         </div>
 
+        <!-- 优质代币合约黑名单弹窗 -->
+        <div id="exclusiveBlacklistModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:1000;justify-content:center;align-items:center">
+            <div style="background:#1e2329;padding:24px;border-radius:8px;width:550px;max-width:90%">
+                <h3 style="margin:0 0 16px 0;color:#f6465d">🚫 优质代币黑名单</h3>
+                <p style="color:#848e9c;font-size:12px;margin-bottom:12px">添加到黑名单的合约地址对应的代币将不参与AI匹配</p>
+                <div style="margin-bottom:12px;display:flex;gap:8px">
+                    <input id="exclusiveBlacklistInput" type="text" style="flex:1;background:#2b3139;border:1px solid #363c45;border-radius:4px;padding:8px;color:#eaecef;font-family:monospace;font-size:11px" placeholder="输入合约地址，如: 0x...">
+                    <button onclick="addToExclusiveBlacklist()" style="background:#f6465d;color:#fff;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;white-space:nowrap">添加</button>
+                </div>
+                <div id="exclusiveBlacklistList" style="max-height:300px;overflow-y:auto;background:#0b0e11;border-radius:4px;padding:8px">
+                    <div style="color:#848e9c;text-align:center;padding:20px">加载中...</div>
+                </div>
+                <div style="display:flex;gap:12px;justify-content:flex-end;margin-top:16px">
+                    <button onclick="closeExclusiveBlacklistModal()" style="background:#363c45;color:#eaecef;border:none;padding:8px 16px;border-radius:4px;cursor:pointer">关闭</button>
+                </div>
+            </div>
+        </div>
+
         <!-- 提示词查看弹窗 -->
         <div id="promptModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:1000;justify-content:center;align-items:center">
             <div style="background:#1e2329;padding:24px;border-radius:8px;width:700px;max-width:95%;max-height:90vh;overflow-y:auto">
@@ -304,6 +328,16 @@ HTML_TEMPLATE = """
             const m = date.getMinutes().toString().padStart(2,'0');
             const s = date.getSeconds().toString().padStart(2,'0');
             return `${h}:${m}:${s}`;
+        }
+        function formatDateTime(ts) {
+            if (!ts) return '';
+            const date = new Date(ts * 1000);
+            const y = date.getFullYear();
+            const M = (date.getMonth() + 1).toString().padStart(2,'0');
+            const d = date.getDate().toString().padStart(2,'0');
+            const h = date.getHours().toString().padStart(2,'0');
+            const m = date.getMinutes().toString().padStart(2,'0');
+            return `${y}-${M}-${d} ${h}:${m}`;
         }
         function escapeHtml(str) {
             if (!str) return '';
@@ -351,9 +385,12 @@ HTML_TEMPLATE = """
         let tokenChainFilter = 'ALL';
         let showExclusive = false;  // 是否显示优质代币
         let exclusiveTokens = [];   // 优质代币缓存
+        let exclusiveBlacklistSet = new Set();  // 优质代币黑名单集合（用于快速查找）
         let lastServiceData = {};  // 每个服务的上次数据
         let deleteMode = false;  // 删除模式
         let selectedIds = new Set();  // 选中的记录ID
+        let exclusiveBlacklistMode = false;  // 优质代币加黑模式
+        let selectedBlacklistAddrs = new Set();  // 选中要加黑的合约地址
 
         function setTokenChainFilter(chain) {
             tokenChainFilter = chain;
@@ -372,12 +409,98 @@ HTML_TEMPLATE = """
 
         async function loadExclusiveTokens() {
             try {
-                const resp = await fetch('api/exclusive');
-                const data = await resp.json();
-                exclusiveTokens = data.items || [];
+                // 并行加载优质代币和黑名单
+                const [tokenResp, blacklistResp] = await Promise.all([
+                    fetch('api/exclusive'),
+                    fetch('api/exclusive_blacklist')
+                ]);
+                const tokenData = await tokenResp.json();
+                const blacklistData = await blacklistResp.json();
+                exclusiveTokens = tokenData.items || [];
+                exclusiveBlacklistSet = new Set((blacklistData.blacklist || []).map(a => a.toLowerCase()));
             } catch (e) {
                 console.error('加载优质代币失败:', e);
                 exclusiveTokens = [];
+                exclusiveBlacklistSet = new Set();
+            }
+        }
+
+        function toggleExclusiveBlacklistMode() {
+            exclusiveBlacklistMode = !exclusiveBlacklistMode;
+            selectedBlacklistAddrs.clear();
+            lastServiceData['token_service'] = '';  // 强制刷新
+            refresh();
+        }
+
+        function toggleSelectBlacklistAddr(addr) {
+            if (selectedBlacklistAddrs.has(addr)) {
+                selectedBlacklistAddrs.delete(addr);
+            } else {
+                selectedBlacklistAddrs.add(addr);
+            }
+            // 更新复选框状态
+            const checkbox = document.getElementById('bl-check-' + addr.slice(0,8));
+            if (checkbox) checkbox.checked = selectedBlacklistAddrs.has(addr);
+            updateBlacklistBtnText();
+        }
+
+        function updateBlacklistBtnText() {
+            const btn = document.getElementById('confirmBlacklistBtn');
+            if (btn) {
+                btn.textContent = selectedBlacklistAddrs.size > 0 ? `确认加黑 (${selectedBlacklistAddrs.size})` : '确认加黑';
+            }
+        }
+
+        async function confirmAddToBlacklist() {
+            if (selectedBlacklistAddrs.size === 0) {
+                alert('请选择要加黑的代币');
+                return;
+            }
+            try {
+                // 批量添加到黑名单
+                for (const addr of selectedBlacklistAddrs) {
+                    await fetch('api/exclusive_blacklist', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ address: addr })
+                    });
+                }
+                // 刷新黑名单
+                const blacklistResp = await fetch('api/exclusive_blacklist');
+                const blacklistData = await blacklistResp.json();
+                exclusiveBlacklistSet = new Set((blacklistData.blacklist || []).map(a => a.toLowerCase()));
+                // 退出加黑模式
+                exclusiveBlacklistMode = false;
+                selectedBlacklistAddrs.clear();
+                lastServiceData['token_service'] = '';
+                refresh();
+            } catch (e) {
+                alert('加黑失败: ' + e.message);
+            }
+        }
+
+        function cancelExclusiveBlacklistMode() {
+            exclusiveBlacklistMode = false;
+            selectedBlacklistAddrs.clear();
+            lastServiceData['token_service'] = '';
+            refresh();
+        }
+
+        async function removeFromBlacklistQuick(addr) {
+            try {
+                const resp = await fetch('api/exclusive_blacklist', {
+                    method: 'DELETE',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ address: addr })
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    exclusiveBlacklistSet = new Set((data.blacklist || []).map(a => a.toLowerCase()));
+                    lastServiceData['token_service'] = '';
+                    refresh();
+                }
+            } catch (e) {
+                alert('解除失败: ' + e.message);
             }
         }
 
@@ -524,6 +647,10 @@ HTML_TEMPLATE = """
                     statsHtml = `<div class="stat-item">记录: <span class="stat-value">${d.total_matches || 0}</span></div>
                                 <div class="stat-item">追踪: <span class="stat-value">${d.total_tracked || 0}</span></div>
                                 <div class="stat-item">待处理: <span class="stat-value">${d.pending_tasks || 0}</span></div>`;
+                } else if (s.name === 'alpha_call_service') {
+                    statsHtml = `<div class="stat-item">Call: <span class="stat-value">${d.total_calls || 0}</span></div>
+                                <div class="stat-item">合约: <span class="stat-value">${d.total_contracts || 0}</span></div>
+                                <div class="stat-item">最后: <span class="stat-value">${formatTime(d.last_call)}</span></div>`;
                 }
 
                 // 数据列表
@@ -535,7 +662,7 @@ HTML_TEMPLATE = """
                     dataHtml += `<div class="data-section">
                         <div class="data-title">📊 匹配记录</div>`;
                     if (records.length > 0) {
-                        dataHtml += `<div class="data-list">${records.map(r => {
+                        dataHtml += `<div class="data-list" style="max-height:150px">${records.map(r => {
                             // 追踪状态
                             let statusBadge;
                             const errMsgs = {'-1': '无交易对', '-2': 'HTTP错误', '-3': '网络异常'};
@@ -562,6 +689,69 @@ HTML_TEMPLATE = """
                         }).join('')}</div>`;
                     } else {
                         dataHtml += `<div class="no-data" style="padding:10px;color:#848e9c">暂无记录</div>`;
+                    }
+                    dataHtml += `</div>`;
+                }
+
+                // alpha_call_service 显示合约及调用历史
+                if (s.name === 'alpha_call_service') {
+                    let contractStats = s.recent?.stats || [];
+
+                    // 格式化市值
+                    const formatMcap = (mcap) => {
+                        if (!mcap || mcap <= 0) return '-';
+                        if (mcap >= 1000000) return '$' + (mcap/1000000).toFixed(1) + 'M';
+                        if (mcap >= 1000) return '$' + (mcap/1000).toFixed(0) + 'k';
+                        return '$' + mcap.toFixed(0);
+                    };
+
+                    // 格式化时间（短格式）
+                    const formatShortTime = (ts) => {
+                        if (!ts) return '-';
+                        const d = new Date(ts * 1000);
+                        return (d.getMonth()+1) + '/' + d.getDate() + ' ' +
+                               String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+                    };
+
+                    dataHtml += `<div class="data-section">
+                        <div class="data-title">📢 Alpha Call (${contractStats.length})</div>`;
+                    if (contractStats.length > 0) {
+                        dataHtml += `<div class="data-list" style="max-height:320px">${contractStats.slice(0, 20).map(c => {
+                            const chainBadge = c.chain === 'SOL' ? '<span style="background:#9945FF;color:#fff;padding:1px 4px;border-radius:3px;font-size:9px;margin-right:4px">SOL</span>' : '<span style="background:#F0B90B;color:#000;padding:1px 4px;border-radius:3px;font-size:9px;margin-right:4px">BSC</span>';
+                            const mcapStr = formatMcap(c.market_cap);
+
+                            // 调用历史列表
+                            const callsHtml = (c.calls || []).map(call => {
+                                const callMcap = formatMcap(call.market_cap);
+                                return `<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:10px;color:#848e9c;border-top:1px dashed #2b3139">
+                                    <span>${formatShortTime(call.time)}</span>
+                                    <span style="color:#02c076">${callMcap}</span>
+                                    <span style="max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${call.group_name || call.group_id}">${call.group_name || call.group_id}</span>
+                                </div>`;
+                            }).join('');
+
+                            return `<div class="data-item" style="padding:6px 0;border-bottom:1px solid #2b3139">
+                                <div style="display:flex;justify-content:space-between;align-items:center">
+                                    <div>
+                                        ${chainBadge}
+                                        <span class="symbol">${c.symbol || 'Unknown'}</span>
+                                        ${c.name ? `<span style="color:#848e9c;font-size:9px;margin-left:3px">${c.name}</span>` : ''}
+                                    </div>
+                                    <div>
+                                        <span style="color:#02c076;font-size:10px;margin-right:6px">${mcapStr}</span>
+                                        <span style="background:#02c076;color:#fff;padding:2px 6px;border-radius:10px;font-size:10px;font-weight:bold">${c.count}次</span>
+                                    </div>
+                                </div>
+                                <div style="color:#F0B90B;font-size:10px;margin-top:3px;cursor:pointer;word-break:break-all" onclick="copyText('${c.address}')" title="点击复制">
+                                    📋 ${c.address}
+                                </div>
+                                <div style="margin-top:4px;padding-left:8px">
+                                    ${callsHtml}
+                                </div>
+                            </div>`;
+                        }).join('')}</div>`;
+                    } else {
+                        dataHtml += `<div class="no-data" style="padding:10px;color:#848e9c">暂无 Alpha Call</div>`;
                     }
                     dataHtml += `</div>`;
                 }
@@ -678,8 +868,16 @@ HTML_TEMPLATE = """
                                     </div>` : ''}
                                 </div>
                                 <div style="display:flex;gap:4px">
-                                    <button onclick="toggleExclusiveMode()" style="background:${showExclusive?'#02c076':'#363c45'};color:#fff;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:10px">${showExclusive?'返回':'优质'}</button>
-                                    ${!showExclusive ? `<button onclick="openInjectTokenModal()" style="background:#F0B90B;color:#000;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:10px">注入代币</button>` : ''}
+                                    ${showExclusive && exclusiveBlacklistMode ? `
+                                        <button id="confirmBlacklistBtn" onclick="confirmAddToBlacklist()" style="background:#f6465d;color:#fff;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:10px">确认加黑</button>
+                                        <button onclick="cancelExclusiveBlacklistMode()" style="background:#363c45;color:#eaecef;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:10px">取消</button>
+                                    ` : `
+                                        <button onclick="toggleExclusiveMode()" style="background:${showExclusive?'#02c076':'#363c45'};color:#fff;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:10px">${showExclusive?'返回':'优质'}</button>
+                                        ${showExclusive ? `
+                                            <button onclick="toggleExclusiveBlacklistMode()" style="background:#848e9c;color:#fff;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:10px">一键加黑</button>
+                                            <button onclick="openExclusiveBlacklistModal()" style="background:#f6465d;color:#fff;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:10px">黑名单</button>
+                                        ` : `<button onclick="openInjectTokenModal()" style="background:#F0B90B;color:#000;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:10px">注入代币</button>`}
+                                    `}
                                 </div>
                             </div>`;
                         if (filteredItems.length > 0) {
@@ -688,7 +886,22 @@ HTML_TEMPLATE = """
                                     const shortCa = r.address ? (r.address.length > 16 ? r.address.slice(0,8) + '...' + r.address.slice(-6) : r.address) : '';
                                     const caHtml = shortCa ? `<span style="color:#848e9c;font-size:9px;font-family:monospace;margin-left:6px;cursor:pointer" title="点击复制: ${r.address}" onclick="copyText('${r.address}')">${shortCa}</span>` : '';
                                     const extraInfo = showExclusive && r.priceChange24h ? ` <span style="color:${r.priceChange24h>=0?'#02c076':'#f6465d'}">${r.priceChange24h>=0?'+':''}${(r.priceChange24h*100).toFixed(1)}%</span>` : '';
-                                    return `<div class="data-item">${chainBadge}<span class="symbol" style="cursor:pointer" title="点击复制" onclick="copyText('${r.symbol}')">${r.symbol}</span> ${r.name}${caHtml} <span class="time">${formatTime(r.time/1000)} | MC:${r.marketCap} H:${r.holders}${extraInfo}</span></div>`;
+
+                                    // 优质代币模式下的黑名单标识
+                                    let prefixHtml = '';
+                                    if (showExclusive && r.address) {
+                                        const isBlacklisted = exclusiveBlacklistSet.has(r.address.toLowerCase());
+                                        if (isBlacklisted) {
+                                            // 已在黑名单中，显示禁止符号，点击可解除
+                                            prefixHtml = `<span onclick="removeFromBlacklistQuick('${r.address}')" style="cursor:pointer;margin-right:6px;font-size:14px" title="点击解除黑名单">🚫</span>`;
+                                        } else if (exclusiveBlacklistMode) {
+                                            // 加黑模式，显示复选框
+                                            prefixHtml = `<input type="checkbox" id="bl-check-${r.address.slice(0,8)}" ${selectedBlacklistAddrs.has(r.address) ? 'checked' : ''} onclick="toggleSelectBlacklistAddr('${r.address}')" style="margin-right:6px;cursor:pointer;accent-color:#f6465d">`;
+                                        }
+                                    }
+
+                                    const timeStr = showExclusive ? formatDateTime(r.time/1000) : formatTime(r.time/1000);
+                                    return `<div class="data-item">${prefixHtml}${chainBadge}<span class="symbol" style="cursor:pointer" title="点击复制" onclick="copyText('${r.symbol}')">${r.symbol}</span> ${r.name}${caHtml} <span class="time">${timeStr} | MC:${r.marketCap} H:${r.holders}${extraInfo}</span></div>`;
                                 }).join('')}</div>`;
                         } else {
                             dataHtml += `<div class="no-data" style="padding:10px;color:#848e9c">${showExclusive ? '加载中...' : '暂无代币'}</div>`;
@@ -1239,6 +1452,96 @@ HTML_TEMPLATE = """
             if (e.target === this) closeBlacklistModal();
         });
 
+        // 优质代币合约黑名单弹窗
+        let currentExclusiveBlacklist = [];
+
+        function openExclusiveBlacklistModal() {
+            document.getElementById('exclusiveBlacklistModal').style.display = 'flex';
+            document.getElementById('exclusiveBlacklistInput').value = '';
+            loadExclusiveBlacklist();
+        }
+
+        function closeExclusiveBlacklistModal() {
+            document.getElementById('exclusiveBlacklistModal').style.display = 'none';
+        }
+
+        async function loadExclusiveBlacklist() {
+            try {
+                const resp = await fetch('api/exclusive_blacklist');
+                const data = await resp.json();
+                currentExclusiveBlacklist = data.blacklist || [];
+                renderExclusiveBlacklist();
+            } catch (e) {
+                document.getElementById('exclusiveBlacklistList').innerHTML =
+                    '<div style="color:#f6465d;text-align:center;padding:20px">加载失败: ' + e.message + '</div>';
+            }
+        }
+
+        function renderExclusiveBlacklist() {
+            const container = document.getElementById('exclusiveBlacklistList');
+            if (currentExclusiveBlacklist.length === 0) {
+                container.innerHTML = '<div style="color:#848e9c;text-align:center;padding:20px">暂无黑名单</div>';
+                return;
+            }
+            container.innerHTML = currentExclusiveBlacklist.map(addr => {
+                const shortAddr = addr.length > 20 ? addr.slice(0,10) + '...' + addr.slice(-8) : addr;
+                return `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px;border-bottom:1px solid #2b3139">
+                    <span style="color:#eaecef;font-family:monospace;font-size:11px;cursor:pointer" title="${addr}" onclick="copyText('${addr}')">${shortAddr}</span>
+                    <button onclick="removeFromExclusiveBlacklist('${addr}')" style="background:#f6465d;color:#fff;border:none;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:10px">删除</button>
+                </div>`;
+            }).join('');
+        }
+
+        async function addToExclusiveBlacklist() {
+            const input = document.getElementById('exclusiveBlacklistInput');
+            const address = input.value.trim();
+            if (!address) {
+                alert('请输入合约地址');
+                return;
+            }
+
+            try {
+                const resp = await fetch('api/exclusive_blacklist', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ address: address })
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    currentExclusiveBlacklist = data.blacklist || [];
+                    renderExclusiveBlacklist();
+                    input.value = '';
+                } else {
+                    alert('添加失败: ' + (data.error || '未知错误'));
+                }
+            } catch (e) {
+                alert('添加失败: ' + e.message);
+            }
+        }
+
+        async function removeFromExclusiveBlacklist(address) {
+            try {
+                const resp = await fetch('api/exclusive_blacklist', {
+                    method: 'DELETE',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ address: address })
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    currentExclusiveBlacklist = data.blacklist || [];
+                    renderExclusiveBlacklist();
+                } else {
+                    alert('删除失败: ' + (data.error || '未知错误'));
+                }
+            } catch (e) {
+                alert('删除失败: ' + e.message);
+            }
+        }
+
+        document.getElementById('exclusiveBlacklistModal').addEventListener('click', function(e) {
+            if (e.target === this) closeExclusiveBlacklistModal();
+        });
+
         // 提示词弹窗
         let promptData = null;
         let currentPromptTab = 'deepseek';
@@ -1532,6 +1835,58 @@ def api_remove_blacklist():
         data = request.json
         resp = requests.delete(
             f'{config.get_service_url("match")}/blacklist',
+            json=data,
+            timeout=5,
+            proxies={'http': None, 'https': None}
+        )
+        if resp.status_code == 200:
+            return jsonify(resp.json())
+        return jsonify({'success': False, 'error': resp.text}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/exclusive_blacklist', methods=['GET'])
+def api_get_exclusive_blacklist():
+    """获取优质代币合约黑名单"""
+    try:
+        resp = requests.get(
+            f'{config.get_service_url("match")}/exclusive_blacklist',
+            timeout=5,
+            proxies={'http': None, 'https': None}
+        )
+        if resp.status_code == 200:
+            return jsonify(resp.json())
+        return jsonify({'blacklist': [], 'error': resp.text}), 400
+    except Exception as e:
+        return jsonify({'blacklist': [], 'error': str(e)}), 500
+
+
+@app.route('/api/exclusive_blacklist', methods=['POST'])
+def api_add_exclusive_blacklist():
+    """添加合约到黑名单"""
+    try:
+        data = request.json
+        resp = requests.post(
+            f'{config.get_service_url("match")}/exclusive_blacklist',
+            json=data,
+            timeout=5,
+            proxies={'http': None, 'https': None}
+        )
+        if resp.status_code == 200:
+            return jsonify(resp.json())
+        return jsonify({'success': False, 'error': resp.text}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/exclusive_blacklist', methods=['DELETE'])
+def api_remove_exclusive_blacklist():
+    """从黑名单移除合约"""
+    try:
+        data = request.json
+        resp = requests.delete(
+            f'{config.get_service_url("match")}/exclusive_blacklist',
             json=data,
             timeout=5,
             proxies={'http': None, 'https': None}

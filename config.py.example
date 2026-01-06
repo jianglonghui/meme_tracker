@@ -97,7 +97,7 @@ HEADERS = {
     "clienttype": "web",
     "clientversion": "1.2.0",
     "content-type": "application/json",
-    "csrftoken": "YOUR_TOKEN",
+    "csrftoken": "YOUR_TOKEN", #注意定期重新获取
     "lang": "en",
     "origin": "https://web3.binance.com",
     "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
@@ -107,7 +107,7 @@ HEADERS = {
 # 从 news_event.py 同步的完整登录 cookies
 COOKIE_STR = os.environ.get('BINANCE_COOKIES',
     "YOUR_COOKIES"
-)
+) #注意定期重新获取
 COOKIES = {item.split("=")[0]: item.split("=", 1)[1] for item in COOKIE_STR.split("; ") if "=" in item}
 
 # ==================== 业务配置 ====================

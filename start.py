@@ -44,6 +44,7 @@ def allocate_ports():
         'token': 5051,
         'tracker': 5052,
         'match': 5053,
+        'alpha_call': 5054,
         'dashboard': 5080,  # 避免 5060 (浏览器会阻止 SIP 端口)
     }
     assigned = set()
@@ -66,6 +67,7 @@ SERVICES = [
     {'name': 'token_service', 'file': 'token_service.py', 'port': PORTS['token'], 'desc': '代币发现'},
     {'name': 'tracker_service', 'file': 'tracker_service.py', 'port': PORTS['tracker'], 'desc': '代币跟踪'},
     {'name': 'match_service', 'file': 'match_service.py', 'port': PORTS['match'], 'desc': '代币撮合'},
+    {'name': 'alpha_call_service', 'file': 'alpha_call_service.py', 'port': PORTS['alpha_call'], 'desc': 'Alpha Call'},
     {'name': 'dashboard', 'file': 'dashboard.py', 'port': PORTS['dashboard'], 'desc': '控制面板'},
 ]
 

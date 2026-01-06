@@ -140,6 +140,51 @@ GEMINI_PROMPT_TEMPLATE = """作为meme币分析师，从推文内容和图片中
 返回JSON数组（最多3个，按潜力排序）："""
 
 
+# ==================== 优质代币合约黑名单 ====================
+def load_exclusive_blacklist():
+    """加载优质代币合约黑名单"""
+    try:
+        if os.path.exists(config.EXCLUSIVE_BLACKLIST_FILE):
+            with open(config.EXCLUSIVE_BLACKLIST_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"[合约黑名单] 加载失败: {e}", flush=True)
+    return []
+
+
+def save_exclusive_blacklist(blacklist):
+    """保存优质代币合约黑名单"""
+    try:
+        with open(config.EXCLUSIVE_BLACKLIST_FILE, 'w', encoding='utf-8') as f:
+            json.dump(blacklist, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"[合约黑名单] 保存失败: {e}", flush=True)
+        return False
+
+
+def add_to_exclusive_blacklist(address):
+    """添加合约到黑名单"""
+    blacklist = load_exclusive_blacklist()
+    address = address.strip().lower()
+    if address and address not in blacklist:
+        blacklist.append(address)
+        save_exclusive_blacklist(blacklist)
+        return True
+    return False
+
+
+def remove_from_exclusive_blacklist(address):
+    """从黑名单移除合约"""
+    blacklist = load_exclusive_blacklist()
+    address = address.strip().lower()
+    if address in blacklist:
+        blacklist.remove(address)
+        save_exclusive_blacklist(blacklist)
+        return True
+    return False
+
+
 # 优质代币缓存
 exclusive_tokens_cache = []
 
@@ -198,12 +243,22 @@ def get_exclusive_tokens():
 
 def match_exclusive_with_ai(keywords):
     """用 AI 判断关键词和优质代币的匹配关系"""
-    tokens = get_exclusive_tokens()
-    if not tokens or not keywords:
+    all_tokens = get_exclusive_tokens()
+    if not all_tokens or not keywords:
         return []
 
-    # 构建代币列表字符串
-    token_list = [f"{i+1}. {t['symbol']} ({t['name']})" for i, t in enumerate(tokens[:30])]
+    # 加载合约黑名单，过滤掉黑名单中的代币
+    blacklist = load_exclusive_blacklist()
+    blacklist_lower = [b.lower() for b in blacklist]
+
+    # 过滤：合约地址在黑名单中的代币不参与匹配
+    tokens = [t for t in all_tokens if t.get('address', '').lower() not in blacklist_lower]
+
+    if not tokens:
+        return []
+
+    # 构建代币列表字符串（包含 symbol 和 name）
+    token_list = [f"{i+1}. symbol:{t['symbol']} name:{t['name']}" for i, t in enumerate(tokens[:30])]
     token_str = "\n".join(token_list)
     keywords_str = ", ".join(keywords)
 
@@ -215,7 +270,7 @@ def match_exclusive_with_ai(keywords):
 {token_str}
 
 规则:
-- 关键词必须与代币名称或符号有明确关联（包含、谐音、缩写等）
+- 关键词需要与代币的 symbol 或 name 有明确关联（包含、谐音、缩写等）
 - 如果有匹配，返回代币序号（如 "1" 或 "3"）
 - 如果多个匹配，返回最相关的一个序号
 - 如果没有任何匹配，返回 "none"
@@ -242,7 +297,7 @@ def match_exclusive_with_ai(keywords):
                 idx = int(result.replace('.', '').strip()) - 1
                 if 0 <= idx < len(tokens):
                     matched_token = tokens[idx]
-                    print(f"[AI匹配] 关键词 {keywords_str} -> {matched_token['symbol']}", flush=True)
+                    print(f"[AI匹配] 关键词 {keywords_str} -> {matched_token['symbol']} ({matched_token['name']})", flush=True)
                     return [matched_token]
             except:
                 pass
@@ -1229,6 +1284,37 @@ def api_remove_blacklist():
         return jsonify({'success': False, 'error': '代币名称不能为空'}), 400
     success = remove_from_blacklist(token_name)
     return jsonify({'success': success, 'blacklist': load_blacklist()})
+
+
+# ==================== 优质代币合约黑名单 API ====================
+@app.route('/exclusive_blacklist', methods=['GET'])
+def get_exclusive_blacklist():
+    """获取优质代币合约黑名单"""
+    return jsonify({'blacklist': load_exclusive_blacklist()})
+
+
+@app.route('/exclusive_blacklist', methods=['POST'])
+def api_add_exclusive_blacklist():
+    """添加合约到黑名单"""
+    from flask import request
+    data = request.get_json()
+    address = data.get('address', '')
+    if not address:
+        return jsonify({'success': False, 'error': '合约地址不能为空'}), 400
+    success = add_to_exclusive_blacklist(address)
+    return jsonify({'success': success, 'blacklist': load_exclusive_blacklist()})
+
+
+@app.route('/exclusive_blacklist', methods=['DELETE'])
+def api_remove_exclusive_blacklist():
+    """从黑名单移除合约"""
+    from flask import request
+    data = request.get_json()
+    address = data.get('address', '')
+    if not address:
+        return jsonify({'success': False, 'error': '合约地址不能为空'}), 400
+    success = remove_from_exclusive_blacklist(address)
+    return jsonify({'success': success, 'blacklist': load_exclusive_blacklist()})
 
 
 # ==================== 提示词模版 API ====================
