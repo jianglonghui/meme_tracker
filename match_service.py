@@ -1173,7 +1173,13 @@ def fetch_news_stream():
                         # 合并内容和图片
                         ref_content = data.get('refContent', '') or ''
                         full_content = content
-                        if ref_content:
+                        if event_type == 'follow':
+                            # follow 消息：把被关注者信息传给 AI
+                            ref_author = data.get('refAuthor', '')
+                            ref_author_name = data.get('refAuthorName', '')
+                            follow_info = f"关注了 @{ref_author}" + (f" ({ref_author_name})" if ref_author_name else "")
+                            full_content = f"{follow_info}\n\n{content}" if content else follow_info
+                        elif ref_content:
                             full_content = f"{content}\n\n引用推文: {ref_content}" if content else ref_content
                         ref_images = data.get('refImages', []) or []
                         all_images = images + ref_images if ref_images else images

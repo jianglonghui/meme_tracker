@@ -3,12 +3,14 @@ Alpha Group Call 服务 (端口 5054)
 - 接收 Telegram 群聊中的合约信息
 - 统计接收次数、时间、来源群聊
 - 通过搜索 API 获取代币信息和市值
+- 监测市值变化，翻倍时推送通知
 - 持久化记录
 """
 import sqlite3
 import time
 import json
 import requests
+import threading
 from flask import Flask, jsonify, request
 import config
 
@@ -22,8 +24,22 @@ stats = {
     'total_calls': 0,
     'total_contracts': 0,
     'running': True,
-    'last_call': None
+    'last_call': None,
+    'monitoring': 0,
+    'doubled': 0
 }
+
+# 监测队列: {address: {start_time, start_mcap, symbol, name, chain, group_name, sender, history: [{time, mcap}]}}
+monitoring_contracts = {}
+monitoring_lock = threading.Lock()
+
+# 监测配置
+MONITOR_INTERVAL = 10  # 监测间隔（秒）
+MONITOR_DURATION = 600  # 最长监测时间（秒）
+DOUBLE_THRESHOLD = 2.0  # 翻倍阈值
+
+# Telegram 推送地址
+TELEGRAM_PUSH_URL = 'http://127.0.0.1:5060/alpha_double'
 
 
 def init_db():
@@ -41,6 +57,7 @@ def init_db():
             chain TEXT DEFAULT 'Unknown',
             group_id TEXT NOT NULL,
             group_name TEXT,
+            sender TEXT,
             call_time INTEGER NOT NULL,
             market_cap REAL DEFAULT 0,
             extra_info TEXT
@@ -68,7 +85,19 @@ def init_db():
     except:
         pass
     try:
+        cursor.execute('ALTER TABLE alpha_calls ADD COLUMN sender TEXT')
+    except:
+        pass
+    try:
         cursor.execute('ALTER TABLE alpha_contract_stats ADD COLUMN last_market_cap REAL DEFAULT 0')
+    except:
+        pass
+    try:
+        cursor.execute('ALTER TABLE alpha_contract_stats ADD COLUMN last_check_elapsed INTEGER DEFAULT 0')
+    except:
+        pass
+    try:
+        cursor.execute('ALTER TABLE alpha_contract_stats ADD COLUMN last_check_mcap REAL DEFAULT 0')
     except:
         pass
 
@@ -115,7 +144,9 @@ def fetch_token_info(contract_address):
         return None
 
 
-def record_call(contract_address, symbol, name, chain, group_id, group_name, extra_info=None):
+MIN_MCAP_TO_RECORD = 6000  # 最低市值门槛
+
+def record_call(contract_address, symbol, name, chain, group_id, group_name, sender=None, extra_info=None):
     """记录一次 Alpha Call"""
     call_time = int(time.time())
     market_cap = 0
@@ -129,14 +160,19 @@ def record_call(contract_address, symbol, name, chain, group_id, group_name, ext
         market_cap = token_info.get('market_cap', 0)
         print(f"[Alpha Call] 获取到代币信息: {symbol} ${market_cap/1000:.1f}k", flush=True)
 
+    # 市值低于门槛不记录
+    if market_cap < MIN_MCAP_TO_RECORD:
+        print(f"[Alpha Call] 忽略: {symbol or contract_address[:10]} 市值 ${market_cap:.0f} < ${MIN_MCAP_TO_RECORD}", flush=True)
+        return False
+
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
-    # 插入详细记录 (包含市值)
+    # 插入详细记录 (包含市值和发送人)
     cursor.execute('''
-        INSERT INTO alpha_calls (contract_address, symbol, name, chain, group_id, group_name, call_time, market_cap, extra_info)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (contract_address.lower(), symbol, name, chain, group_id, group_name, call_time, market_cap, json.dumps(extra_info) if extra_info else None))
+        INSERT INTO alpha_calls (contract_address, symbol, name, chain, group_id, group_name, sender, call_time, market_cap, extra_info)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (contract_address.lower(), symbol, name, chain, group_id, group_name, sender, call_time, market_cap, json.dumps(extra_info) if extra_info else None))
 
     # 更新统计表
     cursor.execute('SELECT * FROM alpha_contract_stats WHERE contract_address = ?', (contract_address.lower(),))
@@ -167,6 +203,10 @@ def record_call(contract_address, symbol, name, chain, group_id, group_name, ext
         ''', (contract_address.lower(), symbol, name, chain, call_time, call_time, json.dumps([group_id]), market_cap))
         stats['total_contracts'] += 1
 
+        # 首次收到，加入监测队列（需要有市值）
+        if market_cap > 0:
+            add_to_monitoring(contract_address, symbol, name, chain, market_cap, group_name, sender)
+
     conn.commit()
     conn.close()
 
@@ -175,6 +215,7 @@ def record_call(contract_address, symbol, name, chain, group_id, group_name, ext
 
     mcap_str = f" ${market_cap/1000:.0f}k" if market_cap > 0 else ""
     print(f"[Alpha Call] {symbol or contract_address[:10]}{mcap_str} from {group_name or group_id} (总计: {stats['total_calls']})", flush=True)
+    return True
 
 
 @app.route('/call', methods=['POST'])
@@ -191,12 +232,14 @@ def api_call():
     chain = data.get('chain', 'Unknown')
     group_id = str(data.get('group_id', '') or data.get('chat_id', '') or 'unknown')
     group_name = data.get('group_name', '') or data.get('chat_name', '')
+    sender = data.get('sender', '') or data.get('from_user', '')
     extra_info = data.get('extra', None)
 
-    record_call(contract_address, symbol, name, chain, group_id, group_name, extra_info)
+    recorded = record_call(contract_address, symbol, name, chain, group_id, group_name, sender, extra_info)
 
     return jsonify({
         'success': True,
+        'recorded': recorded,
         'contract': contract_address,
         'total_calls': stats['total_calls']
     })
@@ -235,16 +278,21 @@ def api_recent():
             addr = row['contract_address']
             if addr not in calls_by_contract:
                 calls_by_contract[addr] = []
-            # 获取市值 (兼容旧表)
+            # 获取市值和发送人 (兼容旧表)
             try:
                 mcap = row['market_cap'] or 0
             except:
                 mcap = 0
+            try:
+                sender = row['sender'] or ''
+            except:
+                sender = ''
             calls_by_contract[addr].append({
                 'time': row['call_time'],
                 'market_cap': mcap,
                 'group_id': row['group_id'],
-                'group_name': row['group_name'] or ''
+                'group_name': row['group_name'] or '',
+                'sender': sender
             })
 
     conn.close()
@@ -258,6 +306,15 @@ def api_recent():
             last_mcap = row['last_market_cap'] or 0
         except:
             last_mcap = 0
+        # 获取最后检查数据 (兼容旧表)
+        try:
+            last_check_elapsed = row['last_check_elapsed'] or 0
+        except:
+            last_check_elapsed = 0
+        try:
+            last_check_mcap = row['last_check_mcap'] or 0
+        except:
+            last_check_mcap = 0
         contract_stats.append({
             'address': addr,
             'symbol': row['symbol'] or '',
@@ -267,6 +324,8 @@ def api_recent():
             'first_time': row['first_call_time'],
             'last_time': row['last_call_time'],
             'market_cap': last_mcap,
+            'last_check_elapsed': last_check_elapsed,
+            'last_check_mcap': last_check_mcap,
             'calls': calls_by_contract.get(addr, [])  # 每次调用的详情
         })
 
@@ -278,13 +337,17 @@ def api_recent():
 @app.route('/status')
 def api_status():
     """服务状态"""
+    with monitoring_lock:
+        monitoring_count = len(monitoring_contracts)
     return jsonify({
         'service': 'alpha_call_service',
         'port': config.get_port('alpha_call'),
         'running': stats['running'],
         'total_calls': stats['total_calls'],
         'total_contracts': stats['total_contracts'],
-        'last_call': stats['last_call']
+        'last_call': stats['last_call'],
+        'monitoring': monitoring_count,
+        'doubled': stats['doubled']
     })
 
 
@@ -310,6 +373,170 @@ def api_clear():
     return jsonify({'success': True, 'message': '已清空所有记录'})
 
 
+def add_to_monitoring(contract_address, symbol, name, chain, market_cap, group_name, sender):
+    """添加合约到监测队列"""
+    addr = contract_address.lower()
+    with monitoring_lock:
+        if addr in monitoring_contracts:
+            # 已在监测中，跳过
+            return False
+        monitoring_contracts[addr] = {
+            'start_time': time.time(),
+            'start_mcap': market_cap,
+            'symbol': symbol,
+            'name': name,
+            'chain': chain,
+            'group_name': group_name,
+            'sender': sender,
+            'history': [{'time': 0, 'mcap': market_cap}],
+            'notified': False
+        }
+        print(f"[监测] 开始监测 {symbol or addr[:10]} 初始市值: ${market_cap/1000:.0f}k", flush=True)
+        return True
+
+
+def push_double_notification(contract_info, current_mcap, gain_ratio):
+    """推送翻倍通知到 Telegram"""
+    try:
+        payload = {
+            'address': contract_info.get('address', ''),
+            'symbol': contract_info.get('symbol', ''),
+            'name': contract_info.get('name', ''),
+            'chain': contract_info.get('chain', ''),
+            'start_mcap': contract_info.get('start_mcap', 0),
+            'current_mcap': current_mcap,
+            'gain_ratio': gain_ratio,
+            'group_name': contract_info.get('group_name', ''),
+            'sender': contract_info.get('sender', ''),
+            'history': contract_info.get('history', []),
+            'elapsed_seconds': int(time.time() - contract_info.get('start_time', time.time()))
+        }
+        resp = requests.post(
+            TELEGRAM_PUSH_URL,
+            json=payload,
+            timeout=5,
+            proxies={'http': None, 'https': None}
+        )
+        if resp.status_code == 200:
+            print(f"[推送] {contract_info.get('symbol', '')} 翻倍通知已发送", flush=True)
+            return True
+        else:
+            print(f"[推送] 失败: HTTP {resp.status_code}", flush=True)
+    except Exception as e:
+        print(f"[推送] 异常: {e}", flush=True)
+    return False
+
+
+def monitor_thread():
+    """监测线程：每10秒检查一次市值"""
+    print("[监测] 监测线程启动", flush=True)
+    while stats['running']:
+        time.sleep(MONITOR_INTERVAL)
+
+        now = time.time()
+        to_remove = []
+
+        with monitoring_lock:
+            contracts_to_check = list(monitoring_contracts.items())
+
+        for addr, info in contracts_to_check:
+            elapsed = now - info['start_time']
+
+            # 超时移除
+            if elapsed > MONITOR_DURATION:
+                to_remove.append(addr)
+                print(f"[监测] {info['symbol'] or addr[:10]} 超时停止监测", flush=True)
+                continue
+
+            # 获取当前市值
+            token_info = fetch_token_info(addr)
+            if not token_info:
+                continue
+
+            current_mcap = token_info.get('market_cap', 0)
+            if current_mcap <= 0:
+                continue
+
+            # 市值低于门槛，停止监测
+            if current_mcap < MIN_MCAP_TO_RECORD:
+                to_remove.append(addr)
+                print(f"[监测] {info['symbol'] or addr[:10]} 市值 ${current_mcap/1000:.1f}k < $6k 停止监测", flush=True)
+                continue
+
+            # 记录历史
+            elapsed_int = int(elapsed)
+            with monitoring_lock:
+                if addr in monitoring_contracts:
+                    monitoring_contracts[addr]['history'].append({
+                        'time': elapsed_int,
+                        'mcap': current_mcap
+                    })
+
+            # 更新数据库中的最后检查数据
+            try:
+                conn = sqlite3.connect(DB_PATH)
+                cursor = conn.cursor()
+                cursor.execute('''
+                    UPDATE alpha_contract_stats
+                    SET last_check_elapsed = ?, last_check_mcap = ?
+                    WHERE contract_address = ?
+                ''', (elapsed_int, current_mcap, addr))
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                print(f"[监测] 更新数据库失败: {e}", flush=True)
+
+            start_mcap = info['start_mcap']
+            if start_mcap <= 0:
+                continue
+
+            gain_ratio = current_mcap / start_mcap
+
+            # 检查是否翻倍
+            if gain_ratio >= DOUBLE_THRESHOLD and not info.get('notified'):
+                print(f"[翻倍] {info['symbol'] or addr[:10]} 市值从 ${start_mcap/1000:.0f}k 涨到 ${current_mcap/1000:.0f}k ({gain_ratio:.1f}x)", flush=True)
+
+                # 更新 info 包含地址
+                info['address'] = addr
+
+                # 推送通知
+                if push_double_notification(info, current_mcap, gain_ratio):
+                    stats['doubled'] += 1
+                    with monitoring_lock:
+                        if addr in monitoring_contracts:
+                            monitoring_contracts[addr]['notified'] = True
+
+                to_remove.append(addr)
+
+        # 移除完成的监测
+        with monitoring_lock:
+            for addr in to_remove:
+                if addr in monitoring_contracts:
+                    del monitoring_contracts[addr]
+
+
+@app.route('/monitoring')
+def api_monitoring():
+    """获取当前监测中的合约"""
+    with monitoring_lock:
+        contracts = []
+        for addr, info in monitoring_contracts.items():
+            contracts.append({
+                'address': addr,
+                'symbol': info.get('symbol', ''),
+                'chain': info.get('chain', ''),
+                'start_mcap': info.get('start_mcap', 0),
+                'elapsed': int(time.time() - info.get('start_time', time.time())),
+                'history': info.get('history', []),
+                'group_name': info.get('group_name', ''),
+                'sender': info.get('sender', '')
+            })
+    return jsonify({
+        'count': len(contracts),
+        'contracts': contracts
+    })
+
+
 if __name__ == "__main__":
     init_db()
 
@@ -324,6 +551,10 @@ if __name__ == "__main__":
         conn.close()
     except:
         pass
+
+    # 启动监测线程
+    monitor = threading.Thread(target=monitor_thread, daemon=True)
+    monitor.start()
 
     port = config.get_port('alpha_call')
     print(f"Alpha Call 服务启动: http://127.0.0.1:{port}", flush=True)

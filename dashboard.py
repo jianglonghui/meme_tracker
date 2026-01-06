@@ -150,9 +150,9 @@ HTML_TEMPLATE = """
             <div id="news_service_card"></div>
             <div id="token_service_card"></div>
             <div id="match_service_card"></div>
-            <div style="display:grid;grid-template-rows:1fr 1fr;gap:15px">
+            <div style="display:grid;grid-template-rows:auto 1fr;gap:15px">
+                <div id="alpha_call_service_card" style="max-height:400px;overflow:hidden"></div>
                 <div id="tracker_service_card"></div>
-                <div id="alpha_call_service_card"></div>
             </div>
         </div>
 
@@ -600,7 +600,10 @@ HTML_TEMPLATE = """
             return Math.random();
         }
 
-        function renderServices(services) {
+        function renderServices(services, monitoringData) {
+            // 确保 monitoringData 有默认值
+            monitoringData = monitoringData || {count: 0, contracts: []};
+
             // 时间戳和时间线始终更新
             updateTimestamps(services);
 
@@ -616,11 +619,12 @@ HTML_TEMPLATE = """
                     lastServiceData[s.name] = stableData;
                 }
 
-                container.innerHTML = renderServiceCard(s);
+                container.innerHTML = renderServiceCard(s, monitoringData);
             });
         }
 
-        function renderServiceCard(s) {
+        function renderServiceCard(s, monitoringData) {
+                monitoringData = monitoringData || {count: 0, contracts: []};
                 const isOnline = s.status === 'online';
                 const statusClass = isOnline ? 'online' : 'offline';
                 const statusText = isOnline ? '运行中' : '离线';
@@ -648,9 +652,11 @@ HTML_TEMPLATE = """
                                 <div class="stat-item">追踪: <span class="stat-value">${d.total_tracked || 0}</span></div>
                                 <div class="stat-item">待处理: <span class="stat-value">${d.pending_tasks || 0}</span></div>`;
                 } else if (s.name === 'alpha_call_service') {
+                    const monitorCount = (monitoringData && monitoringData.count) || 0;
                     statsHtml = `<div class="stat-item">Call: <span class="stat-value">${d.total_calls || 0}</span></div>
                                 <div class="stat-item">合约: <span class="stat-value">${d.total_contracts || 0}</span></div>
-                                <div class="stat-item">最后: <span class="stat-value">${formatTime(d.last_call)}</span></div>`;
+                                <div class="stat-item">监测: <span class="stat-value" style="color:#F0B90B">${monitorCount}</span></div>
+                                <div class="stat-item">翻倍: <span class="stat-value" style="color:#02c076">${d.doubled || 0}</span></div>`;
                 }
 
                 // 数据列表
@@ -723,12 +729,18 @@ HTML_TEMPLATE = """
                             // 调用历史列表
                             const callsHtml = (c.calls || []).map(call => {
                                 const callMcap = formatMcap(call.market_cap);
+                                const senderInfo = call.sender ? `<span style="color:#F0B90B" title="${call.sender}">${call.sender.length > 12 ? call.sender.slice(0,12)+'...' : call.sender}</span> · ` : '';
                                 return `<div style="display:flex;justify-content:space-between;padding:2px 0;font-size:10px;color:#848e9c;border-top:1px dashed #2b3139">
                                     <span>${formatShortTime(call.time)}</span>
                                     <span style="color:#02c076">${callMcap}</span>
-                                    <span style="max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${call.group_name || call.group_id}">${call.group_name || call.group_id}</span>
+                                    <span style="max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${call.sender ? call.sender + ' @ ' : ''}${call.group_name || call.group_id}">${senderInfo}${call.group_name || call.group_id}</span>
                                 </div>`;
                             }).join('');
+
+                            // 最后检查数据
+                            const lastCheckHtml = c.last_check_elapsed > 0
+                                ? `<div style="font-size:10px;color:#848e9c;margin-top:3px">📊 最后检查: <span style="color:#F0B90B">${c.last_check_elapsed}s</span> · <span style="color:#02c076">${formatMcap(c.last_check_mcap)}</span></div>`
+                                : '';
 
                             return `<div class="data-item" style="padding:6px 0;border-bottom:1px solid #2b3139">
                                 <div style="display:flex;justify-content:space-between;align-items:center">
@@ -745,6 +757,7 @@ HTML_TEMPLATE = """
                                 <div style="color:#F0B90B;font-size:10px;margin-top:3px;cursor:pointer;word-break:break-all" onclick="copyText('${c.address}')" title="点击复制">
                                     📋 ${c.address}
                                 </div>
+                                ${lastCheckHtml}
                                 <div style="margin-top:4px;padding-left:8px">
                                     ${callsHtml}
                                 </div>
@@ -752,6 +765,49 @@ HTML_TEMPLATE = """
                         }).join('')}</div>`;
                     } else {
                         dataHtml += `<div class="no-data" style="padding:10px;color:#848e9c">暂无 Alpha Call</div>`;
+                    }
+                    dataHtml += `</div>`;
+
+                    // 监测中的合约
+                    const monitorContracts = (monitoringData && monitoringData.contracts) || [];
+                    dataHtml += `<div class="data-section" style="margin-top:10px">
+                        <div class="data-title">🔍 监测中 (${monitorContracts.length})</div>`;
+                    if (monitorContracts.length > 0) {
+                        dataHtml += `<div class="data-list" style="max-height:200px">${monitorContracts.map(m => {
+                            const chainBadge = m.chain === 'SOL' ? '<span style="background:#9945FF;color:#fff;padding:1px 4px;border-radius:3px;font-size:9px;margin-right:4px">SOL</span>' : '<span style="background:#F0B90B;color:#000;padding:1px 4px;border-radius:3px;font-size:9px;margin-right:4px">BSC</span>';
+                            const startMcapStr = formatMcap(m.start_mcap);
+
+                            // 计算当前涨幅
+                            const latestMcap = (m.history && m.history.length > 0) ? m.history[m.history.length - 1].mcap : m.start_mcap;
+                            const gainRatio = m.start_mcap > 0 ? (latestMcap / m.start_mcap) : 1;
+                            const gainColor = gainRatio >= 2 ? '#02c076' : gainRatio >= 1.5 ? '#F0B90B' : '#848e9c';
+                            const gainStr = gainRatio.toFixed(2) + 'x';
+
+                            // 市值历史（每条记录：相对时间 + 市值）
+                            const historyHtml = (m.history || []).map(h => {
+                                const hMcap = formatMcap(h.mcap);
+                                const hRatio = m.start_mcap > 0 ? (h.mcap / m.start_mcap) : 1;
+                                const hColor = hRatio >= 2 ? '#02c076' : hRatio >= 1.5 ? '#F0B90B' : '#848e9c';
+                                return `<span style="display:inline-block;margin-right:8px;font-size:10px"><span style="color:#848e9c">${h.time}s</span>:<span style="color:${hColor}">${hMcap}</span></span>`;
+                            }).join('');
+
+                            return `<div class="data-item" style="padding:6px 0;border-bottom:1px solid #2b3139">
+                                <div style="display:flex;justify-content:space-between;align-items:center">
+                                    <div>
+                                        ${chainBadge}
+                                        <span class="symbol">${m.symbol || 'Unknown'}</span>
+                                    </div>
+                                    <div>
+                                        <span style="color:#848e9c;font-size:10px;margin-right:4px">${m.elapsed}s</span>
+                                        <span style="color:${gainColor};font-size:11px;font-weight:bold">${gainStr}</span>
+                                    </div>
+                                </div>
+                                <div style="color:#848e9c;font-size:9px;margin-top:2px;word-break:break-all">${m.address.slice(0,8)}...${m.address.slice(-6)}</div>
+                                <div style="margin-top:4px;line-height:1.6">${historyHtml || '<span style="color:#848e9c;font-size:10px">暂无数据</span>'}</div>
+                            </div>`;
+                        }).join('')}</div>`;
+                    } else {
+                        dataHtml += `<div class="no-data" style="padding:10px;color:#848e9c">暂无监测</div>`;
                     }
                     dataHtml += `</div>`;
                 }
@@ -1103,7 +1159,17 @@ HTML_TEMPLATE = """
 
                 const statusResp = await fetch('api/status');
                 const statusData = await statusResp.json();
-                renderServices(statusData);
+
+                // 获取 Alpha Call 监测数据
+                let monitoringData = {count: 0, contracts: []};
+                try {
+                    const monitorResp = await fetch('api/monitoring');
+                    monitoringData = await monitorResp.json();
+                } catch (e) {
+                    console.warn('Failed to fetch monitoring data:', e);
+                }
+
+                renderServices(statusData, monitoringData);
 
                 // 恢复滚动位置
                 document.querySelectorAll('.data-list').forEach((el, i) => {
@@ -1774,6 +1840,22 @@ def api_exclusive():
         return jsonify({'items': [], 'error': resp.text}), 400
     except Exception as e:
         return jsonify({'items': [], 'error': str(e)}), 500
+
+
+@app.route('/api/monitoring')
+def api_monitoring():
+    """获取 Alpha Call 监测中的合约"""
+    try:
+        resp = requests.get(
+            f'{config.get_service_url("alpha_call")}/monitoring',
+            timeout=5,
+            proxies={'http': None, 'https': None}
+        )
+        if resp.status_code == 200:
+            return jsonify(resp.json())
+        return jsonify({'count': 0, 'contracts': [], 'error': resp.text}), 400
+    except Exception as e:
+        return jsonify({'count': 0, 'contracts': [], 'error': str(e)}), 500
 
 
 @app.route('/api/delete_records', methods=['POST'])
