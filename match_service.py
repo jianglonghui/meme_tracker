@@ -242,7 +242,7 @@ def get_exclusive_tokens():
 
 
 def match_exclusive_with_ai(keywords):
-    """用 AI 判断关键词和优质代币的匹配关系"""
+    """用硬编码规则优先匹配，匹配不到才用 AI 判断"""
     all_tokens = get_exclusive_tokens()
     if not all_tokens or not keywords:
         return []
@@ -257,10 +257,38 @@ def match_exclusive_with_ai(keywords):
     if not tokens:
         return []
 
+    keywords_str = ", ".join(keywords)
+    keywords_lower = [kw.lower() for kw in keywords if kw]
+
+    # ========== 优先：硬编码匹配 ==========
+    best_match = None
+    best_score = 0
+    best_keyword = None
+    best_type = None
+
+    for token in tokens[:30]:
+        symbol = (token.get('symbol') or '').lower()
+        name = (token.get('name') or '').lower()
+        score, matched_kw, match_type = calculate_match_score(keywords_lower, symbol, name)
+        if score > best_score:
+            best_score = score
+            best_match = token
+            best_keyword = matched_kw
+            best_type = match_type
+
+    # 硬编码匹配成功（分数 >= 1.5 表示至少有字符串包含关系）
+    if best_match and best_score >= 1.5:
+        print(f"[硬编码匹配] 关键词 {keywords_str} -> {best_match['symbol']} ({best_match['name']}) 分数:{best_score} 类型:{best_type}", flush=True)
+        matched = best_match.copy()
+        matched['_match_score'] = best_score
+        matched['_matched_keyword'] = best_keyword
+        matched['_match_type'] = best_type
+        return [matched]
+
+    # ========== 回退：AI 匹配 ==========
     # 构建代币列表字符串（包含 symbol 和 name）
     token_list = [f"{i+1}. symbol:{t['symbol']} name:{t['name']}" for i, t in enumerate(tokens[:30])]
     token_str = "\n".join(token_list)
-    keywords_str = ", ".join(keywords)
 
     prompt = f"""判断以下关键词是否与代币列表中的某个代币相关。
 
@@ -296,7 +324,10 @@ def match_exclusive_with_ai(keywords):
             try:
                 idx = int(result.replace('.', '').strip()) - 1
                 if 0 <= idx < len(tokens):
-                    matched_token = tokens[idx]
+                    matched_token = tokens[idx].copy()
+                    matched_token['_match_score'] = 5.0
+                    matched_token['_matched_keyword'] = keywords_str
+                    matched_token['_match_type'] = 'ai_match'
                     print(f"[AI匹配] 关键词 {keywords_str} -> {matched_token['symbol']} ({matched_token['name']})", flush=True)
                     return [matched_token]
             except:
@@ -1084,7 +1115,7 @@ def process_news_item(news_data, full_content, all_images):
                 update_attempt(content, len(matched_tokens), len(matched_tokens), token_names)
                 # log_match 需要 tokenSymbol 字段
                 log_match(author, content, [{'tokenSymbol': t['symbol']} for t in matched_tokens])
-                # 转换格式后发送
+                # 转换格式后发送（使用返回的匹配信息）
                 formatted = [{
                     'tokenAddress': t['address'],
                     'tokenSymbol': t['symbol'],
@@ -1093,9 +1124,9 @@ def process_news_item(news_data, full_content, all_images):
                     'marketCap': t['marketCap'],
                     'liquidity': t.get('liquidity', 0),
                     'source': 'exclusive',
-                    '_match_score': 5.0,  # AI 匹配给高分
-                    '_matched_keyword': ', '.join(keywords),
-                    '_match_type': 'ai_match'
+                    '_match_score': t.get('_match_score', 5.0),
+                    '_matched_keyword': t.get('_matched_keyword', ', '.join(keywords)),
+                    '_match_type': t.get('_match_type', 'ai_match')
                 } for t in matched_tokens]
                 send_to_tracker(news_data, keywords, formatted)
 
