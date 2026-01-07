@@ -1719,7 +1719,9 @@ def index():
 def get_recent_data(service):
     """获取服务的最近数据"""
     try:
-        resp = requests.get(f"{service['url']}/recent", timeout=2, proxies={'http': None, 'https': None})
+        # match_service 可能需要更长时间（AI处理）
+        timeout = 5 if service['name'] == 'match_service' else 2
+        resp = requests.get(f"{service['url']}/recent", timeout=timeout, proxies={'http': None, 'https': None})
         if resp.status_code == 200:
             return resp.json()
     except:

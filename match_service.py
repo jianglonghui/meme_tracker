@@ -1583,7 +1583,7 @@ def recent():
         pending = [{
             'author': p['news_data'].get('author', ''),
             'content': p['news_data'].get('content', '')[:100],
-            'keywords': p['keywords'][:5] if p['keywords'] else [],
+            'keywords': p.get('keywords', [])[:5] if p.get('keywords') else [],
             'matched_count': len(p['matched_token_ids']),
             'expire_time': p['expire_time']
         } for p in pending_news]
