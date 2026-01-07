@@ -32,6 +32,25 @@ NEWS_BUFFER_SIZE = 10
 
 app = Flask(__name__)
 
+# ==================== 低信息熵词表（分词匹配时过滤） ====================
+# 这些词在加密推文中出现频率极高，单独匹配容易误匹配
+LOW_ENTROPY_WORDS = {
+    # 英文 - 加密通用词
+    'crypto', 'coin', 'token', 'nft', 'web3', 'defi', 'blockchain',
+    'bitcoin', 'btc', 'eth', 'bnb', 'sol', 'usdt', 'usdc',
+    # 英文 - 交易所
+    'binance', 'coinbase', 'okx', 'bybit', 'kucoin', 'gate',
+    # 英文 - 常见词
+    'the', 'a', 'an', 'to', 'for', 'and', 'or', 'is', 'are', 'was', 'be',
+    'in', 'on', 'at', 'of', 'with', 'by', 'from', 'this', 'that', 'it',
+    'new', 'big', 'first', 'best', 'top', 'major', 'price', 'market',
+    # 中文 - 交易相关
+    'k线', '分析', '市场', '交易', '入场', '出场', '趋势', '信号',
+    '比特', '以太', '合约', '现货', '杠杆', '仓位', '止损', '止盈',
+    # 中文 - 交易所
+    '币安', '欧易', '火币',
+}
+
 
 # ==================== 黑名单管理 ====================
 def load_blacklist():
@@ -892,13 +911,16 @@ def match_name_in_tweet(name, tweet_lower):
     if not name or len(name) < 2:
         return False, None, None, 0
 
-    # 1. 完整匹配（最高优先级）
+    # 1. 完整匹配（最高优先级，不过滤）
     if name in tweet_lower:
         return True, name, "推文包含name", 4.0
 
-    # 2. 分词匹配（次优先级）
+    # 2. 分词匹配（过滤低信息熵词，防止误匹配）
     tokens = tokenize_name(name)
     for token in tokens:
+        # 跳过低信息熵词（如 crypto, coin, 币安, k线 等）
+        if token.lower() in LOW_ENTROPY_WORDS:
+            continue
         if token in tweet_lower:
             return True, token, "推文包含name分词", 3.0
 
