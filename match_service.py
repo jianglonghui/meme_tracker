@@ -1412,8 +1412,13 @@ def process_news_item(news_data, full_content, all_images):
                 # 更新 attempt 显示
                 token_names = [t['symbol'] for t in matched_tokens]
                 update_attempt(content, len(matched_tokens), len(matched_tokens), token_names)
-                # log_match 需要 tokenSymbol 字段
-                log_match(author, content, [{'tokenSymbol': t['symbol']} for t in matched_tokens])
+                # log_match 传递完整信息
+                log_match(author, content, [{
+                    'tokenSymbol': t['symbol'],
+                    '_match_time_cost': t.get('_match_time_cost', 0),
+                    '_match_method': t.get('_match_method', 'ai'),
+                    '_token_source': t.get('_token_source', 'exclusive')
+                } for t in matched_tokens])
                 # 转换格式后发送（使用返回的匹配信息，每个代币有独立耗时）
                 formatted = [{
                     'tokenAddress': t['address'],
