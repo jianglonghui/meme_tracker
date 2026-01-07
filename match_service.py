@@ -300,6 +300,8 @@ def match_exclusive_with_ai(tweet_text):
             matched['_match_score'] = best_score
             matched['_matched_keyword'] = best_keyword
             matched['_match_type'] = best_type
+            matched['_match_method'] = 'hardcoded'  # 匹配逻辑
+            matched['_token_source'] = 'exclusive'  # 代币来源：优质代币
             # 匹配成功后，将代币名称加入缓存
             symbol = (best_match.get('symbol') or '').lower()
             if symbol:
@@ -348,6 +350,8 @@ def match_exclusive_with_ai(tweet_text):
                         matched_token['_match_score'] = 5.0
                         matched_token['_matched_keyword'] = matched_token.get('symbol', '')
                         matched_token['_match_type'] = 'ai_match'
+                        matched_token['_match_method'] = 'ai'  # 匹配逻辑
+                        matched_token['_token_source'] = 'exclusive'  # 代币来源：优质代币
                         # AI匹配成功也加入缓存
                         symbol = (matched_token.get('symbol') or '').lower()
                         if symbol:
@@ -988,6 +992,8 @@ def match_tokens(news_time, tweet_text):
                 token_copy['_match_score'] = score
                 token_copy['_matched_keyword'] = matched_word
                 token_copy['_match_type'] = match_type
+                token_copy['_match_method'] = 'hardcoded'  # 匹配逻辑
+                token_copy['_token_source'] = 'new'  # 代币来源：新币
                 holders = float(token.get('holders', 0) or 0)
                 token_copy['_final_score'] = score * holders
                 matched.append(token_copy)
@@ -1043,6 +1049,8 @@ def match_tokens(news_time, tweet_text):
                         token_copy['_match_score'] = 5.0
                         token_copy['_matched_keyword'] = token_copy.get('tokenSymbol', '')
                         token_copy['_match_type'] = 'ai_match'
+                        token_copy['_match_method'] = 'ai'  # 匹配逻辑
+                        token_copy['_token_source'] = 'new'  # 代币来源：新币
                         holders = float(token_copy.get('holders', 0) or 0)
                         token_copy['_final_score'] = 5.0 * holders
                         # AI匹配成功也加入缓存
@@ -1267,6 +1275,8 @@ def check_pending_news():
                             token_copy['_match_score'] = score
                             token_copy['_matched_keyword'] = matched_word
                             token_copy['_match_type'] = match_type
+                            token_copy['_match_method'] = 'hardcoded'  # 匹配逻辑
+                            token_copy['_token_source'] = 'new'  # 代币来源：新币（持续检测）
 
                             author = news_data.get('author', '')
 
@@ -1374,7 +1384,9 @@ def process_news_item(news_data, full_content, all_images):
                     'source': 'exclusive',
                     '_match_score': t.get('_match_score', 5.0),
                     '_matched_keyword': t.get('_matched_keyword', ''),
-                    '_match_type': t.get('_match_type', 'ai_match')
+                    '_match_type': t.get('_match_type', 'ai_match'),
+                    '_match_method': t.get('_match_method', 'ai'),
+                    '_token_source': t.get('_token_source', 'exclusive')
                 } for t in matched_tokens]
                 send_to_tracker(news_data, [], formatted)
 
