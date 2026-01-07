@@ -92,6 +92,12 @@ def init_db():
     except:
         pass
 
+    # 兼容旧表：添加 match_time_cost 字段（匹配耗时，毫秒）
+    try:
+        cursor.execute('ALTER TABLE matched_tokens ADD COLUMN match_time_cost INTEGER DEFAULT 0')
+    except:
+        pass
+
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS market_cap_tracking (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -215,6 +221,7 @@ def save_match_record(news_data, keywords, matched_tokens):
             'match_keyword': token.get('_matched_keyword', ''),
             'match_type': token.get('_match_type', ''),
             'match_method': token.get('_match_method', 'hardcoded'),  # 匹配逻辑：hardcoded/ai
+            'match_time_cost': token.get('_match_time_cost', 0),  # 匹配耗时（毫秒）
             'final_score': token.get('_final_score', 0),
             'source': source,  # 代币来源：new/exclusive
             'tracking': {}  # {60: {mc, change_pct, price}, 300: ..., 600: ...}
@@ -370,13 +377,14 @@ def calculate_performance_score(match_id):
             INSERT INTO matched_tokens
             (match_id, rank, token_address, token_symbol, token_name, chain,
              initial_price, initial_market_cap, initial_holders,
-             match_score, match_keyword, match_type, final_score, source, match_method)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             match_score, match_keyword, match_type, final_score, source, match_method, match_time_cost)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             db_match_id, token['rank'], token['address'], token['symbol'],
             token['name'], token['chain'], token['price'], token['initial_mc'],
             token['holders'], token['match_score'], token['match_keyword'],
-            token['match_type'], token['final_score'], token['source'], token.get('match_method', 'hardcoded')
+            token['match_type'], token['final_score'], token['source'],
+            token.get('match_method', 'hardcoded'), token.get('match_time_cost', 0)
         ))
         token_id = cursor.lastrowid
 
@@ -565,6 +573,7 @@ def recent():
                     'keyword': t['match_keyword'],
                     'match_type': t.get('match_type', ''),
                     'match_method': t.get('match_method', 'hardcoded'),
+                    'match_time_cost': t.get('match_time_cost', 0),
                     'source': t.get('source', 'new')
                 } for t in tokens[:3]],
                 'progress': track_progress,  # {60: n, 300: n, 600: n}
@@ -584,7 +593,7 @@ def recent():
     for row in cursor.fetchall():
         mid = row['id']
         cursor.execute('''
-            SELECT token_symbol, match_keyword, match_type, match_method, source FROM matched_tokens
+            SELECT token_symbol, match_keyword, match_type, match_method, match_time_cost, source FROM matched_tokens
             WHERE match_id = ? ORDER BY rank LIMIT 3
         ''', (mid,))
         tokens = [{
@@ -592,6 +601,7 @@ def recent():
             'keyword': r['match_keyword'],
             'match_type': r['match_type'] or '',
             'match_method': r['match_method'] or 'hardcoded',
+            'match_time_cost': r['match_time_cost'] or 0,
             'source': r['source'] or 'new'
         } for r in cursor.fetchall()]
 

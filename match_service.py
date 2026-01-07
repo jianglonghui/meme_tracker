@@ -1170,15 +1170,19 @@ def add_to_pending(news_data, tweet_text, matched_ids=None):
     news_time = news_data.get('time', 0)
     expire_time = news_time + config.TIME_WINDOW_MS / 1000  # 窗口期结束时间（秒）
 
+    # 过滤掉 None 值
+    valid_ids = [mid for mid in (matched_ids or []) if mid]
+    initial_count = len(valid_ids)
+
     with pending_lock:
         pending_news.append({
             'news_data': news_data,
             'tweet_text': tweet_text,
             'expire_time': expire_time,
-            'matched_token_ids': set(matched_ids) if matched_ids else set(),
+            'matched_token_ids': set(valid_ids),
             'status': 'pending'
         })
-        print(f"[待检测] 添加 @{news_data.get('author')} 到队列，窗口期至 {expire_time}", flush=True)
+        print(f"[待检测] 添加 @{news_data.get('author')} 到队列，初始匹配 {initial_count} 个，窗口期至 {expire_time}", flush=True)
 
 
 def check_pending_news():
@@ -1277,6 +1281,10 @@ def check_pending_news():
                             token_copy['_match_type'] = match_type
                             token_copy['_match_method'] = 'hardcoded'  # 匹配逻辑
                             token_copy['_token_source'] = 'new'  # 代币来源：新币（持续检测）
+                            # 计算匹配耗时：从推文时间到当前时间
+                            news_time_ms = news_time * 1000 if news_time < 10000000000 else news_time
+                            match_time_cost = int(time.time() * 1000) - news_time_ms
+                            token_copy['_match_time_cost'] = match_time_cost
 
                             author = news_data.get('author', '')
 
@@ -1284,6 +1292,7 @@ def check_pending_news():
                             stats['total_matches'] += 1
                             stats['last_match'] = time.time()
                             log_match(author, content, [token_copy])
+                            print(f"[持续检测] @{author} 匹配 {symbol or name} (耗时 {match_time_cost}ms)", flush=True)
                             send_to_tracker(news_data, [], [token_copy])
 
                 # 更新 attempt 记录的窗口代币信息
@@ -1342,16 +1351,24 @@ def process_news_item(news_data, full_content, all_images):
     # 记录撮合尝试
     log_attempt(author, content, [], 0, 0, [])
 
+    # 记录推文接收时间（用于计算匹配耗时）
+    receive_time_ms = current_time_ms
+
     try:
         # 并行启动：新币匹配 + 老币搜索（各自完成后立即推送）
         def match_and_send_new():
             """匹配新币，完成后立即推送"""
             matched_tokens, tokens_in_window, window_token_names = match_tokens(news_time, tweet_text)
             if matched_tokens:
+                # 计算匹配耗时（毫秒）
+                match_time_cost = int(time.time() * 1000) - receive_time_ms
+                for token in matched_tokens:
+                    token['_match_time_cost'] = match_time_cost
+
                 stats['total_matches'] += 1
                 stats['last_match'] = time.time()
                 log_match(author, content, matched_tokens)
-                print(f"[新币] @{author}: {len(matched_tokens)} 个匹配", flush=True)
+                print(f"[新币] @{author}: {len(matched_tokens)} 个匹配 (耗时 {match_time_cost}ms)", flush=True)
                 send_to_tracker(news_data, [], matched_tokens)
 
             # 加入持续检测队列
@@ -1365,9 +1382,12 @@ def process_news_item(news_data, full_content, all_images):
             matched_tokens = match_exclusive_with_ai(tweet_text)
 
             if matched_tokens:
+                # 计算匹配耗时（毫秒）
+                match_time_cost = int(time.time() * 1000) - receive_time_ms
+
                 stats['total_matches'] += 1
                 stats['last_match'] = time.time()
-                print(f"[优质匹配] @{author}: {len(matched_tokens)} 个 ({', '.join(t['symbol'] for t in matched_tokens)})", flush=True)
+                print(f"[优质匹配] @{author}: {len(matched_tokens)} 个 ({', '.join(t['symbol'] for t in matched_tokens)}) (耗时 {match_time_cost}ms)", flush=True)
                 # 更新 attempt 显示
                 token_names = [t['symbol'] for t in matched_tokens]
                 update_attempt(content, len(matched_tokens), len(matched_tokens), token_names)
@@ -1386,7 +1406,8 @@ def process_news_item(news_data, full_content, all_images):
                     '_matched_keyword': t.get('_matched_keyword', ''),
                     '_match_type': t.get('_match_type', 'ai_match'),
                     '_match_method': t.get('_match_method', 'ai'),
-                    '_token_source': t.get('_token_source', 'exclusive')
+                    '_token_source': t.get('_token_source', 'exclusive'),
+                    '_match_time_cost': match_time_cost
                 } for t in matched_tokens]
                 send_to_tracker(news_data, [], formatted)
 
