@@ -241,9 +241,18 @@ def get_exclusive_tokens():
     return exclusive_tokens_cache
 
 
-def match_exclusive_with_ai(tweet_text):
-    """硬编码和AI并行匹配优质代币，优先使用硬编码结果"""
+def match_exclusive_with_ai(tweet_text, start_time_ms=None):
+    """硬编码和AI并行匹配优质代币，优先使用硬编码结果
+
+    Args:
+        tweet_text: 推文内容
+        start_time_ms: 开始匹配的时间（毫秒），用于计算耗时
+    """
     from concurrent.futures import ThreadPoolExecutor
+
+    # 记录开始时间，用于计算每个代币的匹配耗时
+    if start_time_ms is None:
+        start_time_ms = int(time.time() * 1000)
 
     all_tokens = get_exclusive_tokens()
     if not all_tokens or not tweet_text:
@@ -302,6 +311,8 @@ def match_exclusive_with_ai(tweet_text):
             matched['_match_type'] = best_type
             matched['_match_method'] = 'hardcoded'  # 匹配逻辑
             matched['_token_source'] = 'exclusive'  # 代币来源：优质代币
+            # 计算该代币的匹配耗时
+            matched['_match_time_cost'] = int(time.time() * 1000) - start_time_ms
             # 匹配成功后，将代币名称加入缓存
             symbol = (best_match.get('symbol') or '').lower()
             if symbol:
@@ -352,6 +363,8 @@ def match_exclusive_with_ai(tweet_text):
                         matched_token['_match_type'] = 'ai_match'
                         matched_token['_match_method'] = 'ai'  # 匹配逻辑
                         matched_token['_token_source'] = 'exclusive'  # 代币来源：优质代币
+                        # 计算该代币的匹配耗时
+                        matched_token['_match_time_cost'] = int(time.time() * 1000) - start_time_ms
                         # AI匹配成功也加入缓存
                         symbol = (matched_token.get('symbol') or '').lower()
                         if symbol:
@@ -994,6 +1007,9 @@ def match_tokens(news_time, tweet_text):
                 token_copy['_match_type'] = match_type
                 token_copy['_match_method'] = 'hardcoded'  # 匹配逻辑
                 token_copy['_token_source'] = 'new'  # 代币来源：新币
+                # 每个代币独立计算耗时：从代币创建时间到匹配成功
+                create_time = token.get('createTime', 0)
+                token_copy['_match_time_cost'] = int(time.time() * 1000) - create_time if create_time else 0
                 holders = float(token.get('holders', 0) or 0)
                 token_copy['_final_score'] = score * holders
                 matched.append(token_copy)
@@ -1051,6 +1067,9 @@ def match_tokens(news_time, tweet_text):
                         token_copy['_match_type'] = 'ai_match'
                         token_copy['_match_method'] = 'ai'  # 匹配逻辑
                         token_copy['_token_source'] = 'new'  # 代币来源：新币
+                        # 每个代币独立计算耗时：从代币创建时间到匹配成功
+                        create_time = token_copy.get('createTime', 0)
+                        token_copy['_match_time_cost'] = int(time.time() * 1000) - create_time if create_time else 0
                         holders = float(token_copy.get('holders', 0) or 0)
                         token_copy['_final_score'] = 5.0 * holders
                         # AI匹配成功也加入缓存
@@ -1351,7 +1370,7 @@ def process_news_item(news_data, full_content, all_images):
     # 记录撮合尝试
     log_attempt(author, content, [], 0, 0, [])
 
-    # 记录推文接收时间（用于计算匹配耗时）
+    # 记录推文接收时间（用于老币匹配耗时计算）
     receive_time_ms = current_time_ms
 
     try:
@@ -1360,15 +1379,13 @@ def process_news_item(news_data, full_content, all_images):
             """匹配新币，完成后立即推送"""
             matched_tokens, tokens_in_window, window_token_names = match_tokens(news_time, tweet_text)
             if matched_tokens:
-                # 计算匹配耗时（毫秒）
-                match_time_cost = int(time.time() * 1000) - receive_time_ms
-                for token in matched_tokens:
-                    token['_match_time_cost'] = match_time_cost
-
+                # 每个代币已在 match_tokens 中计算独立耗时
                 stats['total_matches'] += 1
                 stats['last_match'] = time.time()
                 log_match(author, content, matched_tokens)
-                print(f"[新币] @{author}: {len(matched_tokens)} 个匹配 (耗时 {match_time_cost}ms)", flush=True)
+                # 显示每个代币的耗时
+                time_costs = [f"{t.get('tokenSymbol', '?')}:{t.get('_match_time_cost', 0)}ms" for t in matched_tokens[:3]]
+                print(f"[新币] @{author}: {len(matched_tokens)} 个匹配 ({', '.join(time_costs)})", flush=True)
                 send_to_tracker(news_data, [], matched_tokens)
 
             # 加入持续检测队列
@@ -1379,21 +1396,20 @@ def process_news_item(news_data, full_content, all_images):
 
         def search_and_send_old():
             """在优质代币中搜索匹配"""
-            matched_tokens = match_exclusive_with_ai(tweet_text)
+            matched_tokens = match_exclusive_with_ai(tweet_text, start_time_ms=receive_time_ms)
 
             if matched_tokens:
-                # 计算匹配耗时（毫秒）
-                match_time_cost = int(time.time() * 1000) - receive_time_ms
-
                 stats['total_matches'] += 1
                 stats['last_match'] = time.time()
-                print(f"[优质匹配] @{author}: {len(matched_tokens)} 个 ({', '.join(t['symbol'] for t in matched_tokens)}) (耗时 {match_time_cost}ms)", flush=True)
+                # 显示每个代币的独立耗时
+                time_costs = [f"{t.get('symbol', '?')}:{t.get('_match_time_cost', 0)}ms" for t in matched_tokens]
+                print(f"[优质匹配] @{author}: {len(matched_tokens)} 个 ({', '.join(time_costs)})", flush=True)
                 # 更新 attempt 显示
                 token_names = [t['symbol'] for t in matched_tokens]
                 update_attempt(content, len(matched_tokens), len(matched_tokens), token_names)
                 # log_match 需要 tokenSymbol 字段
                 log_match(author, content, [{'tokenSymbol': t['symbol']} for t in matched_tokens])
-                # 转换格式后发送（使用返回的匹配信息）
+                # 转换格式后发送（使用返回的匹配信息，每个代币有独立耗时）
                 formatted = [{
                     'tokenAddress': t['address'],
                     'tokenSymbol': t['symbol'],
@@ -1407,7 +1423,7 @@ def process_news_item(news_data, full_content, all_images):
                     '_match_type': t.get('_match_type', 'ai_match'),
                     '_match_method': t.get('_match_method', 'ai'),
                     '_token_source': t.get('_token_source', 'exclusive'),
-                    '_match_time_cost': match_time_cost
+                    '_match_time_cost': t.get('_match_time_cost', 0)
                 } for t in matched_tokens]
                 send_to_tracker(news_data, [], formatted)
 
