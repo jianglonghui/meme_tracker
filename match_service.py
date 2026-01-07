@@ -625,7 +625,12 @@ def log_match(author, content, tokens):
             'time': time.time(),
             'author': author,
             'content': content[:80],
-            'tokens': [t.get('tokenSymbol', '') for t in tokens[:3]]
+            'tokens': [{
+                'symbol': t.get('tokenSymbol') or t.get('symbol', ''),
+                'time_cost': t.get('_match_time_cost', 0),
+                'method': t.get('_match_method', 'hardcoded'),
+                'source': t.get('_token_source') or t.get('source', 'new')
+            } for t in tokens[:3]]
         })
         if len(recent_matches) > MAX_LOG_SIZE:
             recent_matches.pop(0)
