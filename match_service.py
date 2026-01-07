@@ -281,11 +281,13 @@ def match_exclusive_with_ai(tweet_text):
                 score = 5.0
                 match_type = "推文包含symbol"
                 matched_word = symbol
-            # 检查 name 是否在推文中（至少2字符，支持中文）
-            elif name and len(name) >= 2 and name in tweet_lower:
-                score = 4.0
-                match_type = "推文包含name"
-                matched_word = name
+            # 检查 name（支持分词匹配）
+            else:
+                matched, word, mtype, sc = match_name_in_tweet(name, tweet_lower)
+                if matched:
+                    score = sc
+                    match_type = mtype
+                    matched_word = word
 
             if score > best_score:
                 best_score = score
@@ -832,6 +834,55 @@ def extract_keywords(content, image_urls=None):
     return keywords, 'deepseek'
 
 
+def tokenize_name(name):
+    """
+    对代币名称进行分词，返回可匹配的词列表
+    - 英文：按空格分词
+    - 中文：提取连续2字符的子串
+    """
+    if not name:
+        return []
+
+    tokens = []
+
+    # 检查是否包含中文
+    has_chinese = any('\u4e00' <= c <= '\u9fff' for c in name)
+
+    if has_chinese:
+        # 中文：提取连续2字符的子串
+        for i in range(len(name) - 1):
+            substr = name[i:i+2]
+            # 确保子串包含中文且长度>=2
+            if len(substr) >= 2 and any('\u4e00' <= c <= '\u9fff' for c in substr):
+                tokens.append(substr)
+    else:
+        # 英文：按空格分词，只保留长度>=2的词
+        tokens = [w for w in name.split() if len(w) >= 2]
+
+    return tokens
+
+
+def match_name_in_tweet(name, tweet_lower):
+    """
+    检查代币名称是否在推文中匹配
+    返回 (是否匹配, 匹配的词, 匹配类型, 分数)
+    """
+    if not name or len(name) < 2:
+        return False, None, None, 0
+
+    # 1. 完整匹配（最高优先级）
+    if name in tweet_lower:
+        return True, name, "推文包含name", 4.0
+
+    # 2. 分词匹配（次优先级）
+    tokens = tokenize_name(name)
+    for token in tokens:
+        if token in tweet_lower:
+            return True, token, "推文包含name分词", 3.0
+
+    return False, None, None, 0
+
+
 def calculate_match_score(keywords, symbol, name):
     """计算匹配分数"""
     max_score = 0
@@ -924,11 +975,13 @@ def match_tokens(news_time, tweet_text):
                 score = 5.0
                 match_type = "推文包含symbol"
                 matched_word = symbol
-            # 检查 name 是否在推文中（至少2字符，支持中文）
-            elif score == 0 and name and len(name) >= 2 and name in tweet_lower:
-                score = 4.0
-                match_type = "推文包含name"
-                matched_word = name
+            # 检查 name（支持分词匹配）
+            elif score == 0:
+                m, word, mtype, sc = match_name_in_tweet(name, tweet_lower)
+                if m:
+                    score = sc
+                    match_type = mtype
+                    matched_word = word
 
             if score >= config.MIN_MATCH_SCORE:
                 token_copy = token.copy()
@@ -1193,10 +1246,13 @@ def check_pending_news():
                             score = 5.0
                             match_type = "推文包含symbol"
                             matched_word = symbol
-                        elif score == 0 and name and len(name) >= 2 and name in tweet_lower:
-                            score = 4.0
-                            match_type = "推文包含name"
-                            matched_word = name
+                        # 检查 name（支持分词匹配）
+                        elif score == 0:
+                            m, word, mtype, sc = match_name_in_tweet(name, tweet_lower)
+                            if m:
+                                score = sc
+                                match_type = mtype
+                                matched_word = word
 
                         if score > 0:
                             pending['matched_token_ids'].add(token_id)
