@@ -36,7 +36,9 @@ monitoring_lock = threading.Lock()
 # 监测配置
 MONITOR_INTERVAL = 10  # 监测间隔（秒）
 MONITOR_DURATION = 600  # 最长监测时间（秒）
-DOUBLE_THRESHOLD = 2.0  # 翻倍阈值
+DOUBLE_THRESHOLD = 2.0  # 翻倍阈值（相对起始）
+DROP_THRESHOLD = 0.5  # 跌幅阈值（相对起始，跌50%）
+INTERVAL_CHANGE_THRESHOLD = 0.5  # 两次查询之间涨跌幅阈值（50%）
 
 # Telegram 推送地址
 TELEGRAM_PUSH_URL = 'http://127.0.0.1:5060/alpha_double'
@@ -203,9 +205,9 @@ def record_call(contract_address, symbol, name, chain, group_id, group_name, sen
         ''', (contract_address.lower(), symbol, name, chain, call_time, call_time, json.dumps([group_id]), market_cap))
         stats['total_contracts'] += 1
 
-        # 首次收到，加入监测队列（需要有市值）
-        if market_cap > 0:
-            add_to_monitoring(contract_address, symbol, name, chain, market_cap, group_name, sender)
+    # 加入监测队列（如果当前不在监测中且有市值）
+    if market_cap > 0:
+        add_to_monitoring(contract_address, symbol, name, chain, market_cap, group_name, sender)
 
     conn.commit()
     conn.close()
@@ -394,7 +396,9 @@ def add_to_monitoring(contract_address, symbol, name, chain, market_cap, group_n
             'group_name': group_name,
             'sender': sender,
             'history': [{'time': 0, 'mcap': market_cap}],
-            'notified': False
+            'notified_double': False,  # 翻倍通知
+            'notified_drop': False,    # 跌50%通知
+            'notified_interval': False # 区间变化通知
         }
         print(f"[监测] 开始监测 {symbol or addr[:10]} 初始市值: ${market_cap/1000:.0f}k", flush=True)
         return True
@@ -468,6 +472,10 @@ def monitor_thread():
                 print(f"[监测] {info['symbol'] or addr[:10]} 市值 ${current_mcap/1000:.1f}k < $6k 停止监测", flush=True)
                 continue
 
+            # 获取上一次的市值（在记录历史之前）
+            history = info.get('history', [])
+            last_mcap = history[-1]['mcap'] if history else info['start_mcap']
+
             # 记录历史
             elapsed_int = int(elapsed)
             with monitoring_lock:
@@ -496,22 +504,48 @@ def monitor_thread():
                 continue
 
             gain_ratio = current_mcap / start_mcap
+            info['address'] = addr
 
-            # 检查是否翻倍
-            if gain_ratio >= DOUBLE_THRESHOLD and not info.get('notified'):
-                print(f"[翻倍] {info['symbol'] or addr[:10]} 市值从 ${start_mcap/1000:.0f}k 涨到 ${current_mcap/1000:.0f}k ({gain_ratio:.1f}x)", flush=True)
+            # 计算两次查询之间的变化
+            interval_change = (current_mcap - last_mcap) / last_mcap if last_mcap > 0 else 0
 
-                # 更新 info 包含地址
-                info['address'] = addr
+            should_notify = False
+            notify_reason = ''
 
-                # 推送通知
+            # 检查是否翻倍（相对起始）
+            if gain_ratio >= DOUBLE_THRESHOLD and not info.get('notified_double'):
+                should_notify = True
+                notify_reason = f"翻倍 {gain_ratio:.1f}x"
+                with monitoring_lock:
+                    if addr in monitoring_contracts:
+                        monitoring_contracts[addr]['notified_double'] = True
+
+            # 检查是否跌50%（相对起始）
+            elif gain_ratio <= DROP_THRESHOLD and not info.get('notified_drop'):
+                should_notify = True
+                notify_reason = f"跌幅 -{(1-gain_ratio)*100:.0f}%"
+                with monitoring_lock:
+                    if addr in monitoring_contracts:
+                        monitoring_contracts[addr]['notified_drop'] = True
+
+            # 检查两次查询之间涨跌50%
+            elif abs(interval_change) >= INTERVAL_CHANGE_THRESHOLD and not info.get('notified_interval'):
+                should_notify = True
+                sign = '+' if interval_change > 0 else ''
+                notify_reason = f"区间变化 {sign}{interval_change*100:.0f}%"
+                with monitoring_lock:
+                    if addr in monitoring_contracts:
+                        monitoring_contracts[addr]['notified_interval'] = True
+
+            if should_notify:
+                print(f"[推送] {info['symbol'] or addr[:10]} {notify_reason} 市值: ${start_mcap/1000:.0f}k → ${current_mcap/1000:.0f}k", flush=True)
+
                 if push_double_notification(info, current_mcap, gain_ratio):
                     stats['doubled'] += 1
-                    with monitoring_lock:
-                        if addr in monitoring_contracts:
-                            monitoring_contracts[addr]['notified'] = True
 
-                to_remove.append(addr)
+                # 翻倍或大跌后移除监测
+                if gain_ratio >= DOUBLE_THRESHOLD or gain_ratio <= DROP_THRESHOLD:
+                    to_remove.append(addr)
 
         # 移除完成的监测
         with monitoring_lock:
@@ -524,6 +558,7 @@ def monitor_thread():
 def api_monitoring():
     """获取当前监测中的合约"""
     with monitoring_lock:
+        print(f"[监测API] 当前监测数量: {len(monitoring_contracts)}, 合约: {list(monitoring_contracts.keys())[:3]}", flush=True)
         contracts = []
         for addr, info in monitoring_contracts.items():
             contracts.append({
