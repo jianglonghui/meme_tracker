@@ -1030,9 +1030,16 @@ HTML_TEMPLATE = """
                         if (matchList.length > 0) {
                             dataHtml += `<div class="data-section">
                                 <div class="data-title">🎯 成功匹配</div>
-                                <div class="data-list">${matchList.map(r =>
-                                    `<div class="data-item"><span class="author">@${r.author}</span> → <span class="symbol">${r.tokens.join(', ')}</span> <span class="time">${formatTime(r.time)}</span></div>`
-                                ).join('')}</div>
+                                <div class="data-list">${matchList.map(r => {
+                                    // 兼容新旧格式：tokens 可能是 [{symbol, time_cost, method, source}] 或 ['symbol']
+                                    const tokenInfo = r.tokens.map(t => {
+                                        if (typeof t === 'string') return t;
+                                        const method = t.method === 'ai' ? '🤖' : '⚡';
+                                        const source = t.source === 'exclusive' ? '📦' : '🆕';
+                                        return `${t.symbol} <span style="color:#848e9c;font-size:10px">${method}${t.time_cost}ms ${source}</span>`;
+                                    }).join(', ');
+                                    return `<div class="data-item"><span class="author">@${r.author}</span> → <span class="symbol">${tokenInfo}</span> <span class="time">${formatTime(r.time)}</span></div>`;
+                                }).join('')}</div>
                             </div>`;
                         }
                         if (errorList.length > 0) {
