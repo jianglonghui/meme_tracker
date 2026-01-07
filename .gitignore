@@ -5,5 +5,7 @@ test*
 image_cache
 logs
 CLAUDE.md
+__pycache__/
+*.pyc
 
 seen_events.json
