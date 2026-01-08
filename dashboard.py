@@ -50,6 +50,7 @@ HTML_TEMPLATE = """
 <html>
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Meme Tracker Dashboard</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -139,6 +140,105 @@ HTML_TEMPLATE = """
         .no-data { color: #848e9c; text-align: center; padding: 20px; font-size: 13px; }
 
         .refresh-info { text-align: center; color: #848e9c; font-size: 12px; margin-top: 20px; }
+
+        /* ==================== 移动端适配 ==================== */
+        @media (max-width: 768px) {
+            body { padding: 12px; }
+            h1 { font-size: 20px; margin-bottom: 20px; }
+            h2 { font-size: 16px; flex-direction: column; align-items: flex-start !important; gap: 12px; }
+            h2 > div { width: 100%; flex-wrap: wrap; }
+            .container { max-width: 100%; }
+
+            /* 服务卡片单列 */
+            .services {
+                grid-template-columns: 1fr !important;
+                gap: 12px;
+            }
+            .services > div[style*="grid-template-rows"] {
+                display: flex !important;
+                flex-direction: column;
+                gap: 12px;
+            }
+            .service-card { padding: 12px; }
+            .service-header { flex-wrap: wrap; gap: 8px; }
+            .service-name { font-size: 14px; }
+            .service-stats {
+                flex-wrap: wrap;
+                gap: 8px;
+                padding: 6px;
+            }
+            .stat-item { font-size: 11px; }
+
+            /* 时间线压缩 */
+            .timeline { flex-wrap: wrap; }
+            .timeline-bars { min-width: 0; overflow-x: auto; }
+            .timeline-bar { width: 3px; height: 14px; flex-shrink: 0; }
+
+            /* 数据列表 */
+            .data-list { max-height: 250px; padding: 6px; }
+            .data-item { padding: 6px 0; }
+            .data-item .content { font-size: 12px; }
+            .data-item .images img { max-width: 60px; max-height: 60px; }
+            .data-item .avatar { width: 28px; height: 28px; }
+            .data-item .header { flex-wrap: wrap; }
+
+            /* 匹配区域 */
+            .matches { padding: 12px; }
+            .match-item { padding: 10px; }
+            .match-content { font-size: 12px; }
+            .token-badge { padding: 4px 8px; font-size: 11px; }
+
+            /* 弹窗全宽 */
+            #importModal > div,
+            #injectModal > div,
+            #testMatchModal > div,
+            #injectTokenModal > div,
+            #blacklistModal > div,
+            #exclusiveBlacklistModal > div,
+            #promptModal > div {
+                width: calc(100% - 24px) !important;
+                max-width: none !important;
+                margin: 12px;
+                padding: 16px;
+                max-height: 85vh;
+                overflow-y: auto;
+            }
+            #promptModal > div { width: calc(100% - 24px) !important; }
+
+            /* 弹窗内元素 */
+            textarea, input[type="text"] { font-size: 16px !important; } /* 防止iOS缩放 */
+
+            /* 按钮触控优化 */
+            button {
+                min-height: 40px;
+                padding: 10px 14px !important;
+                font-size: 13px !important;
+            }
+            .data-title {
+                padding: 8px 0;
+                font-size: 13px;
+            }
+
+            /* 最佳实践按钮组 */
+            h2[style*="justify-content"] > div {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px !important;
+            }
+            h2[style*="justify-content"] > div button {
+                flex: 1;
+                min-width: 80px;
+            }
+        }
+
+        /* 超小屏幕 (< 400px) */
+        @media (max-width: 400px) {
+            body { padding: 8px; }
+            h1 { font-size: 18px; }
+            .service-stats { font-size: 10px; }
+            .timeline-bar { width: 2px; height: 12px; }
+            .data-item .images img { max-width: 50px; max-height: 50px; }
+        }
     </style>
 </head>
 <body>
@@ -159,6 +259,7 @@ HTML_TEMPLATE = """
         <h2 style="display:flex;justify-content:space-between;align-items:center">
             最佳实践
             <div style="display:flex;gap:8px">
+                <button onclick="exportRecords()" style="background:#0ecb81;color:#fff;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;font-size:12px">📥 导出CSV</button>
                 <button id="deleteBtn" onclick="toggleDeleteMode()" style="background:#363c45;color:#eaecef;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;font-size:12px">移除</button>
                 <button id="confirmDeleteBtn" onclick="confirmDelete()" style="display:none;background:#f6465d;color:#fff;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;font-size:12px">确认移除</button>
                 <button id="cancelDeleteBtn" onclick="cancelDeleteMode()" style="display:none;background:#363c45;color:#eaecef;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;font-size:12px">取消</button>
@@ -502,6 +603,11 @@ HTML_TEMPLATE = """
             } catch (e) {
                 alert('解除失败: ' + e.message);
             }
+        }
+
+        function exportRecords() {
+            // 直接下载 CSV 文件
+            window.location.href = 'api/export_records';
         }
 
         function toggleDeleteMode() {
@@ -1096,7 +1202,7 @@ HTML_TEMPLATE = """
                                     tokensHtml = `<div style="margin-top:4px;font-size:10px">🎯 匹配: ${matchedTokens.map(t => {
                                         const methodIcon = t.method === 'ai' ? '🤖' : '⚡';
                                         const sourceIcon = t.source === 'exclusive' ? '📦' : '🆕';
-                                        return `<span style="color:#0ecb81;margin-right:6px">${t.symbol} ${methodIcon}${sourceIcon} ${t.time_cost || 0}ms</span>`;
+                                        return `<span style="color:#0ecb81;margin-right:6px">${t.symbol} ${methodIcon}${sourceIcon} M:${t.time_cost || 0}ms S:${t.system_latency || 0}ms</span>`;
                                     }).join('')}</div>`;
                                 }
 
@@ -1121,7 +1227,7 @@ HTML_TEMPLATE = """
                                         if (typeof t === 'string') return t;
                                         const method = t.method === 'ai' ? '🤖' : '⚡';
                                         const source = t.source === 'exclusive' ? '📦' : '🆕';
-                                        return `${t.symbol} <span style="color:#848e9c;font-size:10px">${method}${t.time_cost}ms ${source}</span>`;
+                                        return `${t.symbol} <span style="color:#848e9c;font-size:10px">${method} M:${t.time_cost}ms S:${t.system_latency || 0}ms ${source}</span>`;
                                     }).join(', ');
                                     return `<div class="data-item"><span class="author">@${r.author}</span> → <span class="symbol">${tokenInfo}</span> <span class="time">${formatTime(r.time)}</span></div>`;
                                 }).join('')}</div>
@@ -1959,6 +2065,27 @@ def api_monitoring():
         return jsonify({'count': 0, 'contracts': [], 'error': resp.text}), 400
     except Exception as e:
         return jsonify({'count': 0, 'contracts': [], 'error': str(e)}), 500
+
+
+@app.route('/api/export_records', methods=['GET'])
+def api_export_records():
+    """导出匹配记录为 CSV"""
+    try:
+        resp = requests.get(
+            f'{config.get_service_url("tracker")}/export_records',
+            timeout=30,
+            proxies={'http': None, 'https': None}
+        )
+        if resp.status_code == 200:
+            # 透传 CSV 文件
+            return Response(
+                resp.content,
+                mimetype='text/csv',
+                headers=dict(resp.headers)
+            )
+        return jsonify({'success': False, 'error': resp.text}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/delete_records', methods=['POST'])

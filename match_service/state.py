@@ -38,6 +38,10 @@ pending_lock = threading.Lock()
 matched_token_names = set()
 matched_names_lock = threading.Lock()
 
+# ==================== 每条推文专属缓存 ====================
+tweet_matched_cache = {}  # key: tweet_id, value: set of matched symbols
+tweet_cache_lock = threading.Lock()
+
 # ==================== 优质代币缓存 ====================
 exclusive_tokens_cache = []
 
@@ -132,6 +136,7 @@ def log_match(author, content, tokens):
             'tokens': [{
                 'symbol': t.get('tokenSymbol') or t.get('symbol', ''),
                 'time_cost': t.get('_match_time_cost', 0),
+                'system_latency': t.get('_system_latency', 0),
                 'method': t.get('_match_method', 'hardcoded'),
                 'source': t.get('_token_source') or t.get('source', 'new')
             } for t in tokens[:3]]

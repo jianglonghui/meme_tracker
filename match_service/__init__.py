@@ -19,6 +19,7 @@ from .state import (
     pending_news, pending_lock,
     recent_matches, recent_attempts, recent_errors, recent_filtered, log_lock,
     matched_token_names, matched_names_lock,
+    tweet_matched_cache, tweet_cache_lock,
     log_error, log_filtered, log_attempt, log_match,
     update_attempt, update_attempt_task
 )
@@ -32,6 +33,17 @@ from .matchers import (
 )
 from .ai_clients import extract_keywords
 from .utils import load_seen_events, save_seen_events, get_cached_image
+from .orchestrator import MatchOrchestrator
+
+def on_match_found(news_data, keywords, matched_tokens):
+    """Orchestrator 结果回调"""
+    stats['total_matches'] += 1
+    stats['last_match'] = time.time()
+    log_match(news_data.get('author', ''), news_data.get('content', ''), matched_tokens)
+    send_to_tracker(news_data, keywords, matched_tokens)
+
+# 初始化全局调度器
+orchestrator = MatchOrchestrator(send_callback=on_match_found)
 
 app = Flask(__name__)
 executor = ThreadPoolExecutor(max_workers=10)
@@ -130,72 +142,15 @@ def push_to_telegram(news_data, keywords, matched_tokens):
         pass
 
 
-def add_to_pending(news_data, tweet_text, matched_ids=None, image_urls=None):
-    """添加到持续检测队列"""
-    news_time = news_data.get('time', 0)
-    expire_time = news_time + config.TIME_WINDOW_MS / 1000
-
-    with pending_lock:
-        pending_news.append({
-            'news_data': news_data,
-            'tweet_text': tweet_text,
-            'keywords': [],
-            'expire_time': expire_time,
-            'matched_token_ids': set(matched_ids) if matched_ids else set(),
-            'image_urls': image_urls or []
-        })
 
 
-def check_pending_news():
-    """检查持续检测队列"""
-    while stats['running']:
-        time.sleep(5)
-        current_time = time.time()
-
-        with pending_lock:
-            expired = [p for p in pending_news if current_time > p['expire_time']]
-            for p in expired:
-                pending_news.remove(p)
-
-            for pending in pending_news:
-                tweet_text = pending['tweet_text']
-                matched_ids = pending['matched_token_ids']
-                news_data = pending['news_data']
-                image_urls = pending.get('image_urls', [])
-
-                # 检查新代币
-                with token_lock:
-                    for token in token_list:
-                        token_id = token.get('tokenAddress')
-                        if token_id in matched_ids:
-                            continue
-
-                        symbol = (token.get('tokenSymbol') or '').lower()
-                        name = (token.get('tokenName') or '').lower()
-                        tweet_lower = tweet_text.lower()
-
-                        # 简单硬编码匹配
-                        if symbol and len(symbol) >= 2 and symbol in tweet_lower:
-                            matched_ids.add(token_id)
-                            token_copy = token.copy()
-                            token_copy['_match_method'] = 'hardcoded'
-                            token_copy['_token_source'] = 'new'
-                            token_copy['_match_time_cost'] = int(time.time() * 1000) - token.get('createTime', 0)
-
-                            stats['total_matches'] += 1
-                            log_match(news_data.get('author', ''), news_data.get('content', ''), [token_copy])
-                            send_to_tracker(news_data, [], [token_copy])
-
-                            with matched_names_lock:
-                                matched_token_names.add(symbol)
 
 
 def process_news_item(news_data, full_content, all_images):
-    """处理单条推文"""
+    """处理单条推文 (已接入 Orchestrator)"""
     author = news_data.get('author', '')
     content = news_data.get('content', '')
     news_time = news_data.get('time', 0)
-    current_time_ms = int(time.time() * 1000)
 
     tweet_text = full_content or content
     if not tweet_text:
@@ -206,46 +161,35 @@ def process_news_item(news_data, full_content, all_images):
     log_attempt(author, content, [], 0, 0, [])
 
     try:
-        def match_new():
-            matched, tokens_count, names = match_new_tokens(news_time, tweet_text, all_images)
-            if matched:
-                stats['total_matches'] += 1
-                stats['last_match'] = time.time()
-                log_match(author, content, matched)
-                send_to_tracker(news_data, [], matched)
-                for t in matched:
-                    method = t.get('_match_method', 'hardcoded')
-                    task_type = 'new_hardcoded' if method == 'hardcoded' else 'new_ai'
-                    update_attempt_task(content, task_type, 'success', t.get('tokenSymbol'))
-
-            # 加入持续检测
-            window_end = news_time * 1000 + config.TIME_WINDOW_MS
-            if current_time_ms < window_end:
-                matched_ids = [t.get('tokenAddress') for t in matched] if matched else []
-                add_to_pending(news_data, tweet_text, matched_ids, all_images)
-
+        # 1. 处理老币 (专属列表) - 特殊逻辑，依然保留独立横扫
         def match_old():
             matched = match_exclusive_tokens(tweet_text, all_images)
             if matched:
-                stats['total_matches'] += 1
-                stats['last_match'] = time.time()
-                # 转换格式
+                current_time_ms = int(time.time() * 1000)
                 formatted = [{
-                    'tokenAddress': t['address'],
-                    'tokenSymbol': t['symbol'],
-                    'tokenName': t['name'],
-                    'chain': t['chain'],
-                    'marketCap': t['marketCap'],
+                    'tokenAddress': t.get('address') or t.get('tokenAddress'),
+                    'tokenSymbol': t.get('symbol') or t.get('tokenSymbol'),
+                    'tokenName': t.get('name') or t.get('tokenName'),
+                    'chain': t.get('chain'),
+                    'marketCap': t.get('marketCap'),
                     'source': 'exclusive',
                     '_match_method': t.get('_match_method', 'ai'),
                     '_token_source': t.get('_token_source', 'exclusive'),
-                    '_match_time_cost': t.get('_match_time_cost', 0)
+                    '_match_time_cost': t.get('_match_time_cost', 0),
+                    '_system_latency': current_time_ms - (news_time * 1000)
                 } for t in matched]
-                log_match(author, content, formatted)
-                send_to_tracker(news_data, [], formatted)
+                return formatted
+            return []
 
-        executor.submit(match_new)
-        executor.submit(match_old)
+        # 2. 处理新币 (通过 Orchestrator)
+        with token_lock:
+            current_tokens = list(token_list)
+        
+        # 启动主撮合逻辑
+        orchestrator.handle_news(news_data, tweet_text, all_images, current_tokens)
+        
+        # 异步执行老币匹配
+        executor.submit(lambda: [on_match_found(news_data, [], res) for res in [match_old()] if res])
 
     except Exception as e:
         log_error(f"处理推文异常: {e}")
@@ -268,6 +212,8 @@ def fetch_token_stream():
                                 token_list.append(data)
                                 if len(token_list) > MAX_TOKENS:
                                     token_list.pop(0)
+                                # 触发 Orchestrator 增量匹配
+                                orchestrator.handle_token(data)
         except Exception as e:
             log_error(f"代币流: {e}")
             time.sleep(2)
@@ -355,8 +301,7 @@ def exclusive_tokens_updater():
 
 @app.route('/status')
 def status():
-    with pending_lock:
-        pending_count = len(pending_news)
+    active_sessions = orchestrator.get_active_sessions_info()
     return jsonify({
         'service': 'match_service',
         'port': config.MATCH_PORT,
@@ -364,7 +309,7 @@ def status():
         'total_matches': stats['total_matches'],
         'total_news': stats['total_news'],
         'tokens_cached': len(token_list),
-        'pending_detection': pending_count,
+        'active_monitoring_sessions': len(active_sessions),
         'last_match': stats['last_match'],
         'errors': stats['errors'],
         'enable_hardcoded_match': stats['enable_hardcoded_match']
@@ -378,17 +323,15 @@ def recent():
         attempts = list(recent_attempts)[::-1]
         filtered = list(recent_filtered)[::-1]
         errors = list(recent_errors)[::-1]
-    with pending_lock:
-        pending = [{
-            'author': p['news_data'].get('author', ''),
-            'content': p['news_data'].get('content', '')[:100],
-            'keywords': p.get('keywords', [])[:5] if p.get('keywords') else [],
-            'matched_count': len(p['matched_token_ids']),
-            'expire_time': p['expire_time']
-        } for p in pending_news]
+    
+    active_sessions = orchestrator.get_active_sessions_info()
+    
     return jsonify({
-        'matches': matches, 'attempts': attempts,
-        'filtered': filtered, 'pending': pending, 'errors': errors
+        'matches': matches, 
+        'attempts': attempts,
+        'filtered': filtered, 
+        'pending': active_sessions, # 这里的 pending 指的是正在监控窗口内的推文
+        'errors': errors
     })
 
 
@@ -491,7 +434,6 @@ def run():
     # 启动后台线程
     threading.Thread(target=fetch_token_stream, daemon=True).start()
     threading.Thread(target=fetch_news_stream, daemon=True).start()
-    threading.Thread(target=check_pending_news, daemon=True).start()
     threading.Thread(target=exclusive_tokens_updater, daemon=True).start()
 
     print(f"[Match Service] 启动在端口 {config.MATCH_PORT}", flush=True)

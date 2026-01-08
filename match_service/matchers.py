@@ -12,6 +12,7 @@ import config
 from .state import (
     stats, token_list, token_lock,
     matched_token_names, matched_names_lock,
+    tweet_matched_cache, tweet_cache_lock,
     exclusive_tokens_cache, log_error
 )
 from .blacklist import load_exclusive_blacklist
@@ -120,14 +121,113 @@ def search_binance_tokens(keyword):
         return []
 
 
-def match_new_tokens(news_time, tweet_text, image_urls=None):
-    """匹配时间窗口内的新币
+def run_hardcoded_engine(tweet_text, tokens, local_cache=None, source='new'):
+    """仅执行硬编码匹配逻辑 (无IO，无并发)"""
+    matched = []
+    tweet_lower = tweet_text.lower()
+    
+    for token in tokens:
+        symbol = (token.get('tokenSymbol') or token.get('symbol') or '').lower()
+        name = (token.get('tokenName') or token.get('name') or '').lower()
+        score, match_type, matched_word = 0, None, None
 
-    Returns:
-        (matched_tokens, tokens_in_window, window_token_names)
-    """
+        # 缓存命中（同一条推文内）
+        if local_cache is not None and symbol and symbol in local_cache:
+            score, match_type, matched_word = 5.0, "缓存命中", symbol
+
+        # symbol 在推文中
+        if score == 0 and symbol and len(symbol) >= 2 and symbol in tweet_lower:
+            score, match_type, matched_word = 5.0, "推文包含symbol", symbol
+        # name 匹配
+        elif score == 0:
+            m, word, mtype, sc = match_name_in_tweet(name, tweet_lower)
+            if m:
+                score, match_type, matched_word = sc, mtype, word
+
+        if score >= (MIN_MATCH_SCORE if source == 'new' else 1.5):
+            token_copy = token.copy()
+            token_copy['_match_score'] = score
+            token_copy['_matched_keyword'] = matched_word
+            token_copy['_match_type'] = match_type
+            token_copy['_match_method'] = 'hardcoded'
+            token_copy['_token_source'] = source
+            
+            # 时间成本计算（如果是新币，基于其创建时间；如果是老币，基于当前时间起点）
+            if source == 'new':
+                create_time = token.get('createTime', 0)
+                token_copy['_match_time_cost'] = int(time.time() * 1000) - create_time if create_time else 0
+            else:
+                token_copy['_match_time_cost'] = 0 # 老币暂不计延迟
+                
+            matched.append(token_copy)
+            if local_cache is not None and symbol:
+                local_cache.add(symbol)
+
+    matched.sort(key=lambda x: x.get('_match_score', 0), reverse=True)
+    return matched
+
+
+def run_ai_engine(tweet_text, tokens, image_urls=None, local_cache=None, source='new'):
+    """执行 AI 匹配逻辑"""
+    if not tokens or not config.GEMINI_API_KEY:
+        return []
+
+    # 准备图片
+    image_paths = []
+    if image_urls:
+        for url in image_urls[:3]:
+            path = get_cached_image(url)
+            if path:
+                image_paths.append(path)
+
+    # 转换格式供 AI 使用
+    tokens_for_ai = [
+        {'symbol': t.get('tokenSymbol') or t.get('symbol', ''), 
+         'name': t.get('tokenName') or t.get('name', '')} 
+        for t in tokens
+    ]
+    
+    try:
+        idx = call_gemini_judge(tweet_text, tokens_for_ai, image_paths)
+        if 0 <= idx < len(tokens):
+            token_copy = tokens[idx].copy()
+            token_copy['_match_score'] = 5.0
+            token_copy['_matched_keyword'] = token_copy.get('tokenSymbol') or token_copy.get('symbol', '')
+            token_copy['_match_type'] = 'ai_match'
+            token_copy['_match_method'] = 'ai'
+            token_copy['_token_source'] = source
+            
+            if source == 'new':
+                create_time = token_copy.get('createTime', 0)
+                token_copy['_match_time_cost'] = int(time.time() * 1000) - create_time if create_time else 0
+            else:
+                token_copy['_match_time_cost'] = 0
+                
+            # 加入缓存
+            if local_cache is not None:
+                symbol = (token_copy.get('tokenSymbol') or token_copy.get('symbol') or '').lower()
+                if symbol:
+                    local_cache.add(symbol)
+
+            return [token_copy]
+    except Exception as e:
+        print(f"[AI Engine] 异常: {e}", flush=True)
+        
+    return []
+
+
+def match_new_tokens(news_time, tweet_text, image_urls=None, tweet_id=None):
+    """匹配时间窗口内的新币 (保留原接口兼容性)"""
     if not news_time or not tweet_text:
         return [], 0, []
+
+    if tweet_id:
+        with tweet_cache_lock:
+            if tweet_id not in tweet_matched_cache:
+                tweet_matched_cache[tweet_id] = set()
+            local_cache = tweet_matched_cache[tweet_id]
+    else:
+        local_cache = set()
 
     news_time_ms = news_time * 1000
     window_tokens = []
@@ -143,108 +243,21 @@ def match_new_tokens(news_time, tweet_text, image_urls=None):
                 window_token_names.append(token.get('tokenSymbol') or token.get('tokenName') or 'Unknown')
 
     if not window_tokens:
-        return [], len(window_tokens), window_token_names
+        return [], 0, []
 
-    tweet_lower = tweet_text.lower()
-    start_time_ms = int(time.time() * 1000)
-
-    def do_hardcoded():
-        matched = []
-        for token in window_tokens:
-            symbol = (token.get('tokenSymbol') or '').lower()
-            name = (token.get('tokenName') or '').lower()
-            score, match_type, matched_word = 0, None, None
-
-            # 缓存命中
-            with matched_names_lock:
-                if symbol and symbol in matched_token_names:
-                    score, match_type, matched_word = 5.0, "缓存命中", symbol
-
-            # symbol 在推文中
-            if score == 0 and symbol and len(symbol) >= 2 and symbol in tweet_lower:
-                score, match_type, matched_word = 5.0, "推文包含symbol", symbol
-            # name 匹配
-            elif score == 0:
-                m, word, mtype, sc = match_name_in_tweet(name, tweet_lower)
-                if m:
-                    score, match_type, matched_word = sc, mtype, word
-
-            if score >= MIN_MATCH_SCORE:
-                token_copy = token.copy()
-                token_copy['_match_score'] = score
-                token_copy['_matched_keyword'] = matched_word
-                token_copy['_match_type'] = match_type
-                token_copy['_match_method'] = 'hardcoded'
-                token_copy['_token_source'] = 'new'
-                create_time = token.get('createTime', 0)
-                token_copy['_match_time_cost'] = int(time.time() * 1000) - create_time if create_time else 0
-                matched.append(token_copy)
-
-                if symbol:
-                    with matched_names_lock:
-                        matched_token_names.add(symbol)
-
-        matched.sort(key=lambda x: x.get('_match_score', 0), reverse=True)
-        return matched
-
-    def do_ai():
-        if not window_tokens or not config.GEMINI_API_KEY:
-            return []
-
-        # 准备图片
-        image_paths = []
-        if image_urls:
-            for url in image_urls[:3]:
-                path = get_cached_image(url)
-                if path:
-                    image_paths.append(path)
-
-        # 转换格式
-        tokens_for_ai = [{'symbol': t.get('tokenSymbol', ''), 'name': t.get('tokenName', '')} for t in window_tokens]
-        idx = call_gemini_judge(tweet_text, tokens_for_ai, image_paths)
-
-        if idx >= 0 and idx < len(window_tokens):
-            token_copy = window_tokens[idx].copy()
-            token_copy['_match_score'] = 5.0
-            token_copy['_matched_keyword'] = token_copy.get('tokenSymbol', '')
-            token_copy['_match_type'] = 'ai_match'
-            token_copy['_match_method'] = 'ai'
-            token_copy['_token_source'] = 'new'
-            create_time = token_copy.get('createTime', 0)
-            token_copy['_match_time_cost'] = int(time.time() * 1000) - create_time if create_time else 0
-
-            symbol = (token_copy.get('tokenSymbol') or '').lower()
-            if symbol:
-                with matched_names_lock:
-                    matched_token_names.add(symbol)
-            return [token_copy]
-        return []
-
-    # 并行执行
+    # 使用重构后的 Engine
+    hardcoded_result = []
     if stats['enable_hardcoded_match']:
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            f_hard = pool.submit(do_hardcoded)
-            f_ai = pool.submit(do_ai)
-            hardcoded_result = f_hard.result()
-            ai_result = f_ai.result()
-
+        hardcoded_result = run_hardcoded_engine(tweet_text, window_tokens, local_cache, source='new')
         if hardcoded_result:
             return hardcoded_result, len(window_tokens), window_token_names
-    else:
-        ai_result = do_ai()
 
-    if ai_result:
-        return ai_result, len(window_tokens), window_token_names
-
-    return [], len(window_tokens), window_token_names
+    ai_result = run_ai_engine(tweet_text, window_tokens, image_urls, local_cache, source='new')
+    return ai_result, len(window_tokens), window_token_names
 
 
 def match_exclusive_tokens(tweet_text, image_urls=None):
-    """匹配优质代币（老币）
-
-    Returns:
-        matched_tokens list
-    """
+    """匹配优质代币（老币） (保留原接口兼容性)"""
     if not tweet_text:
         return []
 
@@ -260,87 +273,15 @@ def match_exclusive_tokens(tweet_text, image_urls=None):
     if not tokens:
         return []
 
-    tweet_lower = tweet_text.lower()
-    start_time_ms = int(time.time() * 1000)
-
-    def do_hardcoded():
-        best_match, best_score, best_keyword, best_type = None, 0, None, None
-
-        for token in tokens:
-            symbol = (token.get('symbol') or '').lower()
-            name = (token.get('name') or '').lower()
-            score, match_type, matched_word = 0, None, None
-
-            if symbol and len(symbol) >= 2 and symbol in tweet_lower:
-                score, match_type, matched_word = 5.0, "推文包含symbol", symbol
-            else:
-                m, word, mtype, sc = match_name_in_tweet(name, tweet_lower)
-                if m:
-                    score, match_type, matched_word = sc, mtype, word
-
-            if score > best_score:
-                best_score = score
-                best_match = token
-                best_keyword = matched_word
-                best_type = match_type
-
-        if best_match and best_score >= 1.5:
-            matched = best_match.copy()
-            matched['_match_score'] = best_score
-            matched['_matched_keyword'] = best_keyword
-            matched['_match_type'] = best_type
-            matched['_match_method'] = 'hardcoded'
-            matched['_token_source'] = 'exclusive'
-            matched['_match_time_cost'] = int(time.time() * 1000) - start_time_ms
-
-            symbol = (best_match.get('symbol') or '').lower()
-            if symbol:
-                with matched_names_lock:
-                    matched_token_names.add(symbol)
-            return [matched]
-        return []
-
-    def do_ai():
-        if not config.GEMINI_API_KEY:
-            return []
-
-        image_paths = []
-        if image_urls:
-            for url in image_urls[:3]:
-                path = get_cached_image(url)
-                if path:
-                    image_paths.append(path)
-
-        tokens_for_ai = [{'symbol': t.get('symbol', ''), 'name': t.get('name', '')} for t in tokens]
-        idx = call_gemini_judge(tweet_text, tokens_for_ai, image_paths)
-
-        if idx >= 0 and idx < len(tokens):
-            matched = tokens[idx].copy()
-            matched['_match_score'] = 5.0
-            matched['_matched_keyword'] = matched.get('symbol', '')
-            matched['_match_type'] = 'ai_match'
-            matched['_match_method'] = 'ai'
-            matched['_token_source'] = 'exclusive'
-            matched['_match_time_cost'] = int(time.time() * 1000) - start_time_ms
-
-            symbol = (matched.get('symbol') or '').lower()
-            if symbol:
-                with matched_names_lock:
-                    matched_token_names.add(symbol)
-            return [matched]
-        return []
-
-    # 并行执行
+    # 使用重构后的 Engine
+    local_cache = set() # 老币匹配目前不强依赖同一条推文内的 local_cache，但可以传入
+    
+    hardcoded_result = []
     if stats['enable_hardcoded_match']:
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            f_hard = pool.submit(do_hardcoded)
-            f_ai = pool.submit(do_ai)
-            hardcoded_result = f_hard.result()
-            ai_result = f_ai.result()
-
+        hardcoded_result = run_hardcoded_engine(tweet_text, tokens, local_cache, source='exclusive')
         if hardcoded_result:
+            # 兼容格式转换
             return hardcoded_result
-    else:
-        ai_result = do_ai()
 
-    return ai_result if ai_result else []
+    ai_result = run_ai_engine(tweet_text, tokens, image_urls, local_cache, source='exclusive')
+    return ai_result

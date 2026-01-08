@@ -9,7 +9,7 @@ import threading
 import time
 import json
 import requests
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 import config
 
 app = Flask(__name__)
@@ -777,6 +777,85 @@ def delete_best_practice(practice_id):
     conn.commit()
     conn.close()
     return jsonify({'success': True})
+
+
+@app.route('/export_records', methods=['GET'])
+def export_records():
+    """导出匹配记录为 CSV"""
+    import csv
+    import io
+    from datetime import datetime
+
+    conn = sqlite3.connect(config.DB_PATH)
+    cursor = conn.cursor()
+
+    # 查询所有匹配记录和代币信息
+    cursor.execute('''
+        SELECT
+            mr.id, mr.news_time, mr.news_author, mr.news_author_name,
+            mr.news_type, mr.news_content,
+            mt.token_symbol, mt.token_name, mt.token_address, mt.chain,
+            mt.initial_market_cap, mt.match_method, mt.source,
+            mt.mcap_1min, mt.mcap_5min, mt.mcap_10min,
+            mt.change_1min, mt.change_5min, mt.change_10min,
+            mt.is_best, mt.match_time_cost
+        FROM match_records mr
+        LEFT JOIN matched_tokens mt ON mr.id = mt.match_id
+        ORDER BY mr.news_time DESC
+    ''')
+    rows = cursor.fetchall()
+    conn.close()
+
+    # 生成 CSV
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    # 写入表头
+    writer.writerow([
+        'record_id', 'news_time', 'author', 'author_name', 'type', 'content',
+        'symbol', 'name', 'address', 'chain',
+        'initial_mcap', 'match_method', 'source',
+        'mcap_1min', 'mcap_5min', 'mcap_10min',
+        'change_1min%', 'change_5min%', 'change_10min%',
+        'is_best', 'match_time_cost_ms'
+    ])
+
+    # 写入数据
+    for row in rows:
+        record_id, news_time, author, author_name, news_type, content, \
+        symbol, name, address, chain, initial_mcap, method, source, \
+        mcap_1, mcap_5, mcap_10, chg_1, chg_5, chg_10, is_best, time_cost = row
+
+        # 格式化时间
+        time_str = datetime.fromtimestamp(news_time).strftime('%Y-%m-%d %H:%M:%S') if news_time else ''
+
+        # 格式化内容（去除换行）
+        content_clean = (content or '').replace('\n', ' ').replace('\r', '')[:200]
+
+        writer.writerow([
+            record_id, time_str, author, author_name, news_type, content_clean,
+            symbol or '', name or '', address or '', chain or '',
+            f"{initial_mcap:.0f}" if initial_mcap else '',
+            method or '', source or '',
+            f"{mcap_1:.0f}" if mcap_1 else '',
+            f"{mcap_5:.0f}" if mcap_5 else '',
+            f"{mcap_10:.0f}" if mcap_10 else '',
+            f"{chg_1:.2f}" if chg_1 else '',
+            f"{chg_5:.2f}" if chg_5 else '',
+            f"{chg_10:.2f}" if chg_10 else '',
+            is_best or 0, time_cost or 0
+        ])
+
+    output.seek(0)
+
+    # 生成文件名
+    filename = f"match_records_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+
+    return Response(
+        output.getvalue(),
+        mimetype='text/csv',
+        headers={'Content-Disposition': f'attachment; filename={filename}'}
+    )
 
 
 @app.route('/delete_records', methods=['POST'])
