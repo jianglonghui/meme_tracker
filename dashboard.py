@@ -157,10 +157,10 @@ HTML_TEMPLATE = """
         </div>
 
         <h2 style="display:flex;justify-content:space-between;align-items:center">
-            数据库匹配记录
+            最佳实践
             <div style="display:flex;gap:8px">
-                <button id="deleteBtn" onclick="toggleDeleteMode()" style="background:#363c45;color:#eaecef;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;font-size:12px">删除</button>
-                <button id="confirmDeleteBtn" onclick="confirmDelete()" style="display:none;background:#f6465d;color:#fff;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;font-size:12px">确认删除</button>
+                <button id="deleteBtn" onclick="toggleDeleteMode()" style="background:#363c45;color:#eaecef;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;font-size:12px">移除</button>
+                <button id="confirmDeleteBtn" onclick="confirmDelete()" style="display:none;background:#f6465d;color:#fff;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;font-size:12px">确认移除</button>
                 <button id="cancelDeleteBtn" onclick="cancelDeleteMode()" style="display:none;background:#363c45;color:#eaecef;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;font-size:12px">取消</button>
                 <button onclick="openImportModal()" style="background:#F0B90B;color:#000;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;font-size:12px">+ 导入推文</button>
             </div>
@@ -537,15 +537,15 @@ HTML_TEMPLATE = """
 
         function updateDeleteBtnText() {
             const btn = document.getElementById('confirmDeleteBtn');
-            btn.textContent = selectedIds.size > 0 ? `确认删除 (${selectedIds.size})` : '确认删除';
+            btn.textContent = selectedIds.size > 0 ? `确认移除 (${selectedIds.size})` : '确认移除';
         }
 
         async function confirmDelete() {
             if (selectedIds.size === 0) {
-                alert('请选择要删除的记录');
+                alert('请选择要移除的记录');
                 return;
             }
-            if (!confirm(`确定删除 ${selectedIds.size} 条记录吗？`)) {
+            if (!confirm(`确定从最佳实践中移除 ${selectedIds.size} 条记录吗？`)) {
                 return;
             }
             try {
@@ -559,10 +559,10 @@ HTML_TEMPLATE = """
                     cancelDeleteMode();
                     refresh();
                 } else {
-                    alert('删除失败: ' + (data.error || '未知错误'));
+                    alert('移除失败: ' + (data.error || '未知错误'));
                 }
             } catch (e) {
-                alert('删除失败: ' + e.message);
+                alert('移除失败: ' + e.message);
             }
         }
 
@@ -644,9 +644,15 @@ HTML_TEMPLATE = """
                                 <div class="stat-item">最后成功: <span class="stat-value" id="token_service-last-success">${formatTime(d.last_success)}</span></div>
                                 <div class="stat-item">错误: <span class="stat-value ${hasErrors?'error':''}">${d.errors || 0}</span></div>`;
                 } else if (s.name === 'match_service') {
+                    const hardcodedEnabled = d.enable_hardcoded_match !== false;
+                    const toggleColor = hardcodedEnabled ? '#0ecb81' : '#848e9c';
+                    const toggleText = hardcodedEnabled ? '硬编码:开' : '硬编码:关';
                     statsHtml = `<div class="stat-item">匹配: <span class="stat-value">${d.total_matches || 0}</span></div>
                                 <div class="stat-item">缓存: <span class="stat-value">${d.tokens_cached || 0}</span></div>
-                                <div class="stat-item">错误: <span class="stat-value ${hasErrors?'error':''}">${d.errors || 0}</span></div>`;
+                                <div class="stat-item">错误: <span class="stat-value ${hasErrors?'error':''}">${d.errors || 0}</span></div>
+                                <div class="stat-item">
+                                    <button onclick="toggleHardcodedMatch()" id="hardcodedToggleBtn" style="background:${toggleColor};color:#fff;border:none;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:10px">${toggleText}</button>
+                                </div>`;
                 } else if (s.name === 'tracker_service') {
                     statsHtml = `<div class="stat-item">记录: <span class="stat-value">${d.total_matches || 0}</span></div>
                                 <div class="stat-item">追踪: <span class="stat-value">${d.total_tracked || 0}</span></div>
@@ -665,38 +671,83 @@ HTML_TEMPLATE = """
                 // tracker_service 显示匹配记录
                 if (s.name === 'tracker_service') {
                     let records = s.recent?.records || [];
+
+                    // 格式化市值
+                    const fmtMcap = (mcap) => {
+                        if (!mcap || mcap <= 0) return '-';
+                        if (mcap >= 1000000) return (mcap/1000000).toFixed(1) + 'M';
+                        if (mcap >= 1000) return (mcap/1000).toFixed(0) + 'k';
+                        return mcap.toFixed(0);
+                    };
+                    const changeColor = (v) => v > 0 ? '#0ecb81' : (v < 0 ? '#f6465d' : '#848e9c');
+
                     dataHtml += `<div class="data-section">
                         <div class="data-title">📊 匹配记录</div>`;
                     if (records.length > 0) {
-                        dataHtml += `<div class="data-list" style="max-height:150px">${records.map(r => {
-                            // 追踪状态
-                            let statusBadge;
-                            const errMsgs = {'-1': '无交易对', '-2': 'HTTP错误', '-3': '网络异常'};
-                            if (r.error_code) {
-                                const errMsg = errMsgs[r.error_code] || '未知错误';
-                                statusBadge = `<span style="background:#f6465d;color:#fff;padding:2px 6px;border-radius:4px;font-size:10px">${errMsg}</span>`;
-                            } else if (r.track_count >= 3) {
-                                statusBadge = '<span style="background:#02c076;color:#fff;padding:2px 6px;border-radius:4px;font-size:10px">已完成</span>';
-                            } else if (r.track_count > 0) {
-                                statusBadge = '<span style="background:#F0B90B;color:#000;padding:2px 6px;border-radius:4px;font-size:10px">追踪中</span>';
+                        dataHtml += `<div class="data-list" style="max-height:300px">${records.map(r => {
+                            // 代币表格
+                            let tokensTableHtml = '';
+                            if (r.tokens && r.tokens.length > 0) {
+                                tokensTableHtml = `<table style="width:100%;font-size:10px;border-collapse:collapse;margin-top:4px">
+                                    <tr style="color:#848e9c">
+                                        <th style="padding:2px;text-align:left">代币</th>
+                                        <th style="padding:2px">来源</th>
+                                        <th style="padding:2px">匹配</th>
+                                        <th style="padding:2px">初始</th>
+                                        <th style="padding:2px">1min</th>
+                                        <th style="padding:2px">5min</th>
+                                        <th style="padding:2px">10min</th>
+                                        <th style="padding:2px">得分</th>
+                                    </tr>
+                                    ${r.tokens.map(t => {
+                                        const isBest = t.is_best === 1;
+                                        const rowStyle = isBest ? 'background:#1a3d2e;' : '';
+                                        const symbolStyle = isBest ? 'color:#0ecb81;font-weight:bold' : '';
+                                        const sourceLabel = t.source === 'old' ? '📦' : '🆕';
+                                        const methodLabel = t.match_method === 'ai' ? '🤖' : '⚙️';
+                                        const c1 = t.change_1min || 0;
+                                        const c5 = t.change_5min || 0;
+                                        const c10 = t.change_10min || 0;
+                                        return '<tr style="' + rowStyle + '">' +
+                                            '<td style="padding:2px;' + symbolStyle + '">' + (isBest ? '⭐' : '') + t.symbol + '</td>' +
+                                            '<td style="padding:2px;text-align:center">' + sourceLabel + '</td>' +
+                                            '<td style="padding:2px;text-align:center">' + methodLabel + '</td>' +
+                                            '<td style="padding:2px;text-align:center">' + fmtMcap(t.initial_mcap) + '</td>' +
+                                            '<td style="padding:2px;text-align:center;color:' + changeColor(c1) + '">' + fmtMcap(t.mcap_1min) + '</td>' +
+                                            '<td style="padding:2px;text-align:center;color:' + changeColor(c5) + '">' + fmtMcap(t.mcap_5min) + '</td>' +
+                                            '<td style="padding:2px;text-align:center;color:' + changeColor(c10) + '">' + fmtMcap(t.mcap_10min) + '</td>' +
+                                            '<td style="padding:2px;text-align:center">' + (t.final_score || 0).toFixed(1) + '</td>' +
+                                        '</tr>';
+                                    }).join('')}
+                                </table>`;
                             } else {
-                                statusBadge = '<span style="background:#848e9c;color:#fff;padding:2px 6px;border-radius:4px;font-size:10px">等待</span>';
+                                tokensTableHtml = '<div style="color:#848e9c;font-size:10px">无匹配代币</div>';
                             }
-                            // 代币
-                            let tokensHtml = r.tokens && r.tokens.length > 0
-                                ? r.tokens.map(t => `<span class="symbol">${t.symbol}</span>`).join(', ')
-                                : '<span style="color:#848e9c">无</span>';
-                            return `<div class="data-item">
-                                <div><span class="author">@${r.author}</span> ${statusBadge} <span class="time">${formatTime(r.time)}</span></div>
-                                <div class="content">${r.content || '(无内容)'}</div>
-                                <div style="color:#848e9c;font-size:10px">关键词: ${(r.keywords || []).join(', ') || '无'}</div>
-                                <div style="font-size:10px">匹配代币: ${tokensHtml}</div>
+                            return `<div class="data-item" style="padding:6px">
+                                <div><span class="author">@${r.author}</span> <span class="time">${formatTime(r.time)}</span></div>
+                                <div class="content" style="font-size:11px;margin:2px 0">${r.content || '(无内容)'}</div>
+                                ${tokensTableHtml}
                             </div>`;
                         }).join('')}</div>`;
                     } else {
                         dataHtml += `<div class="no-data" style="padding:10px;color:#848e9c">暂无记录</div>`;
                     }
                     dataHtml += `</div>`;
+
+                    // 错误日志
+                    let trackerErrors = s.recent?.errors || [];
+                    if (trackerErrors.length > 0) {
+                        const errId = 'err-tracker-' + Date.now();
+                        dataHtml += '<div class="data-section error-section">' +
+                            '<div class="error-header" onclick="document.getElementById(\\'' + errId + '\\').classList.toggle(\\'show\\')">' +
+                                '<span class="data-title" style="margin:0">⚠️ 错误 (' + trackerErrors.length + ')</span>' +
+                                '<button class="error-toggle">展开</button>' +
+                            '</div>' +
+                            '<div id="' + errId + '" class="error-list data-list">' + trackerErrors.map(r =>
+                                '<div class="data-item error">' + r.msg + ' <span class="time">' + formatTime(r.time) + '</span></div>'
+                            ).join('') + '</div>' +
+                        '</div>';
+                    }
                 }
 
                 // alpha_call_service 显示合约及调用历史
@@ -1014,13 +1065,47 @@ HTML_TEMPLATE = """
                                     statusBadge = `<span style="background:#02c076;color:#fff;padding:2px 6px;border-radius:4px;font-size:10px;margin-left:6px">已完成</span>`;
                                 }
                                 let matchStatus = r.matched > 0 ? `<span class="symbol">✓ ${r.matched}个匹配</span>` : '<span style="color:#848e9c">无匹配</span>';
-                                let keywordsStr = r.keywords && r.keywords.length > 0 ? r.keywords.join(', ') : '(无关键词)';
-                                let windowTokensStr = r.window_tokens && r.window_tokens.length > 0 ? r.window_tokens.join(', ') : '(无)';
+
+                                // 匹配任务状态显示
+                                const tasks = r.match_tasks || {};
+                                const taskStatusIcon = (status) => {
+                                    if (status === 'success') return '✅';
+                                    if (status === 'no_match') return '❌';
+                                    if (status === 'skipped') return '⏭️';
+                                    if (status === 'running') return '🔄';
+                                    if (status === 'error') return '⚠️';
+                                    return '⏳';  // pending
+                                };
+                                const taskNames = {
+                                    'new_hardcoded': '新币⚡',
+                                    'new_ai': '新币🤖',
+                                    'exclusive_hardcoded': '优质⚡',
+                                    'exclusive_ai': '优质🤖'
+                                };
+                                let tasksHtml = Object.entries(tasks).map(([key, val]) => {
+                                    const icon = taskStatusIcon(val.status);
+                                    const name = taskNames[key] || key;
+                                    const resultStr = val.result ? ` (${val.result})` : '';
+                                    return `<span style="margin-right:6px;font-size:10px" title="${key}: ${val.status}${resultStr}">${icon}${name}</span>`;
+                                }).join('');
+
+                                // 匹配到的代币列表
+                                const matchedTokens = r.matched_tokens || [];
+                                let tokensHtml = '';
+                                if (matchedTokens.length > 0) {
+                                    tokensHtml = `<div style="margin-top:4px;font-size:10px">🎯 匹配: ${matchedTokens.map(t => {
+                                        const methodIcon = t.method === 'ai' ? '🤖' : '⚡';
+                                        const sourceIcon = t.source === 'exclusive' ? '📦' : '🆕';
+                                        return `<span style="color:#0ecb81;margin-right:6px">${t.symbol} ${methodIcon}${sourceIcon} ${t.time_cost || 0}ms</span>`;
+                                    }).join('')}</div>`;
+                                }
+
                                 return `<div class="data-item">
                                     <div><span class="author">@${r.author}</span> ${matchStatus} ${statusBadge} <span class="time">${formatTime(r.time)}</span></div>
                                     <div class="content">${escapeHtml(r.content)}</div>
-                                    <div style="color:#848e9c;font-size:10px">关键词: ${escapeHtml(keywordsStr)}</div>
-                                    <div style="color:#848e9c;font-size:10px">窗口代币(${r.tokens_in_window}): ${escapeHtml(windowTokensStr)}</div>
+                                    <div style="color:#848e9c;font-size:10px;margin-top:4px">任务: ${tasksHtml}</div>
+                                    ${tokensHtml}
+                                    <div style="color:#848e9c;font-size:10px">窗口代币(${r.tokens_in_window}): ${escapeHtml(r.window_tokens && r.window_tokens.length > 0 ? r.window_tokens.join(', ') : '(无)')}</div>
                                 </div>`;
                             }).join('')}</div>`;
                         } else {
@@ -1119,47 +1204,19 @@ HTML_TEMPLATE = """
                 // 最佳代币
                 const bestTokensHtml = m.best_tokens && m.best_tokens.length > 0
                     ? m.best_tokens.map(t => `<span class="token-badge">${t.token_symbol}</span>`).join('')
-                    : (m.matched_tokens && m.matched_tokens.length > 0
-                        ? m.matched_tokens.map(t => `<span class="token-badge" style="background:#848e9c">${t.token_symbol}</span>`).join('')
-                        : '<span style="color:#848e9c">等待追踪...</span>');
-
-                // 头像
-                const avatarHtml = m.avatar
-                    ? `<img class="avatar" src="${proxyUrl(m.avatar)}" style="width:40px;height:40px;border-radius:50%;margin-right:10px" onerror="this.style.display='none'">`
-                    : '<div style="width:40px;height:40px;border-radius:50%;background:#2b3139;margin-right:10px"></div>';
-
-                // 图片
-                let imagesHtml = '';
-                if (m.images && m.images.length > 0) {
-                    imagesHtml = '<div style="display:flex;flex-wrap:wrap;gap:6px;margin:8px 0">' +
-                        m.images.map(url => `<img src="${proxyUrl(url)}" style="max-width:150px;max-height:150px;border-radius:6px;cursor:pointer" onclick="window.open('${proxyUrl(url)}')" onerror="this.style.display='none'">`).join('') +
-                        '</div>';
-                }
-
-                // 关键词
-                const keywordsHtml = m.keywords && m.keywords.length > 0
-                    ? `<div style="font-size:11px;color:#848e9c;margin-top:6px">关键词: ${m.keywords.join(', ')}</div>`
-                    : '';
+                    : '<span style="color:#848e9c">无</span>';
 
                 return `<div class="match-item" style="${deleteMode ? 'display:flex;align-items:flex-start' : ''}">
                     ${checkboxHtml}
                     <div style="flex:1">
-                        <div style="display:flex;align-items:flex-start">
-                            ${avatarHtml}
-                            <div style="flex:1">
-                                <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
-                                    <span class="match-author">@${m.author || 'Unknown'}</span>
-                                    <span style="color:#848e9c;font-size:12px">${m.authorName || ''}</span>
-                                    <span style="color:#848e9c;font-size:11px">${formatTime(m.time)}</span>
-                                </div>
-                                <div class="match-content">${m.content || ''}</div>
-                                ${imagesHtml}
-                                ${keywordsHtml}
-                            </div>
+                        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+                            <span class="match-author">@${m.author || 'Unknown'}</span>
+                            <span style="color:#848e9c;font-size:11px">${formatTime(m.time)}</span>
                         </div>
-                        <div style="margin-top:10px;padding-top:10px;border-top:1px solid #2b3139">
-                            <span style="color:#f0b90b;font-size:12px;margin-right:8px">🎯 最佳代币:</span>
-                            <div class="match-tokens" style="display:inline">${bestTokensHtml}</div>
+                        <div class="match-content" style="margin-bottom:8px">${m.content || ''}</div>
+                        <div>
+                            <span style="color:#f0b90b;font-size:12px">🎯 最佳代币:</span>
+                            <span class="match-tokens">${bestTokensHtml}</span>
                         </div>
                     </div>
                 </div>`;
@@ -1448,6 +1505,33 @@ HTML_TEMPLATE = """
 
         // 黑名单弹窗
         let currentBlacklist = [];
+
+        // 硬编码匹配开关
+        async function toggleHardcodedMatch() {
+            try {
+                // 先获取当前状态
+                const getResp = await fetch('api/hardcoded_match');
+                const getData = await getResp.json();
+                const currentEnabled = getData.enabled;
+
+                // 切换状态
+                const resp = await fetch('api/hardcoded_match', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({enabled: !currentEnabled})
+                });
+                const data = await resp.json();
+
+                // 更新按钮显示
+                const btn = document.getElementById('hardcodedToggleBtn');
+                if (btn) {
+                    btn.style.background = data.enabled ? '#0ecb81' : '#848e9c';
+                    btn.textContent = data.enabled ? '硬编码:开' : '硬编码:关';
+                }
+            } catch (e) {
+                console.error('切换硬编码匹配失败:', e);
+            }
+        }
 
         function openBlacklistModal() {
             document.getElementById('blacklistModal').style.display = 'flex';
@@ -1945,6 +2029,30 @@ def api_remove_blacklist():
         return jsonify({'success': False, 'error': resp.text}), 400
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/hardcoded_match', methods=['GET', 'POST'])
+def api_hardcoded_match():
+    """获取或设置硬编码匹配开关"""
+    try:
+        if request.method == 'GET':
+            resp = requests.get(
+                f'{config.get_service_url("match")}/hardcoded_match',
+                timeout=5,
+                proxies={'http': None, 'https': None}
+            )
+        else:
+            resp = requests.post(
+                f'{config.get_service_url("match")}/hardcoded_match',
+                json=request.json,
+                timeout=5,
+                proxies={'http': None, 'https': None}
+            )
+        if resp.status_code == 200:
+            return jsonify(resp.json())
+        return jsonify({'enabled': True, 'error': resp.text}), 400
+    except Exception as e:
+        return jsonify({'enabled': True, 'error': str(e)}), 500
 
 
 @app.route('/api/exclusive_blacklist', methods=['GET'])

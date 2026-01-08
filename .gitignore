@@ -11,3 +11,4 @@ __pycache__/
 seen_events.json
 run.log
 start.sh
+.claude

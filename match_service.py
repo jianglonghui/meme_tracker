@@ -13,7 +13,7 @@ import hashlib
 import sqlite3
 import atexit
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 import config
 
 # 线程池：用于并行处理推文
@@ -260,12 +260,13 @@ def get_exclusive_tokens():
     return exclusive_tokens_cache
 
 
-def match_exclusive_with_ai(tweet_text, start_time_ms=None):
+def match_exclusive_with_ai(tweet_text, start_time_ms=None, image_urls=None):
     """硬编码和AI并行匹配优质代币，优先使用硬编码结果
 
     Args:
         tweet_text: 推文内容
         start_time_ms: 开始匹配的时间（毫秒），用于计算耗时
+        image_urls: 推文图片URL列表
     """
     from concurrent.futures import ThreadPoolExecutor
 
@@ -274,7 +275,11 @@ def match_exclusive_with_ai(tweet_text, start_time_ms=None):
         start_time_ms = int(time.time() * 1000)
 
     all_tokens = get_exclusive_tokens()
-    if not all_tokens or not tweet_text:
+    if not all_tokens:
+        print(f"[老币AI匹配] 跳过: 优质代币缓存为空（等待刷新）", flush=True)
+        return []
+    if not tweet_text:
+        print(f"[老币AI匹配] 跳过: 推文内容为空", flush=True)
         return []
 
     # 加载合约黑名单，过滤掉黑名单中的代币
@@ -285,7 +290,10 @@ def match_exclusive_with_ai(tweet_text, start_time_ms=None):
     tokens = [t for t in all_tokens if t.get('address', '').lower() not in blacklist_lower]
 
     if not tokens:
+        print(f"[老币AI匹配] 跳过: 过滤后无可用代币（全部在黑名单中）", flush=True)
         return []
+
+    print(f"[老币AI匹配] 准备匹配，可用代币: {len(tokens)} 个", flush=True)
 
     tweet_lower = tweet_text.lower()
 
@@ -341,79 +349,125 @@ def match_exclusive_with_ai(tweet_text, start_time_ms=None):
         return []
 
     def do_ai_match():
-        """AI匹配：让AI判断推文和代币的关联"""
+        """AI匹配：让AI判断推文和代币的关联（支持图片）"""
+        if not config.GEMINI_API_KEY:
+            print(f"[老币AI匹配] 跳过: 未配置 GEMINI_API_KEY", flush=True)
+            return []
+
         token_list_str = [f"{i+1}. symbol:{t['symbol']} name:{t['name']}" for i, t in enumerate(tokens[:30])]
         token_str = "\n".join(token_list_str)
 
-        prompt = f"""判断以下推文是否在提及代币列表中的某个代币。
+        has_images = image_urls and len(image_urls) > 0
+        image_hint = "（注意：推文包含图片，请结合图片内容判断）" if has_images else ""
 
-推文内容: {tweet_text[:500]}
+        prompt = f"""判断以下推文是否在提及代币列表中的某个代币。{image_hint}
+
+推文内容: {tweet_text}
 
 代币列表:
 {token_str}
 
 规则:
-- 推文需要与代币的 symbol 或 name 有明确关联（包含、谐音、缩写等）
+- 推文需要与代币的 symbol 或 name 有明确关联（包含、谐音、缩写、翻译等）
+- 如果推文有图片，也要分析图片中是否包含代币相关信息
 - 如果有匹配，返回代币序号（如 "1" 或 "3"）
 - 如果多个匹配，返回最相关的一个序号
 - 如果没有任何匹配，返回 "none"
 
 只返回序号或 "none"，不要其他内容："""
 
+        print(f"[老币AI匹配] prompt (图片:{len(image_urls) if image_urls else 0}张)", flush=True)
+
         try:
-            if config.GEMINI_API_KEY:
-                from google import genai
-                client = genai.Client(api_key=config.GEMINI_API_KEY)
-                response = client.models.generate_content(
-                    model="gemini-2.0-flash-lite",
-                    contents=prompt,
-                )
-                result = response.text.strip().lower()
+            from google import genai
+            from google.genai import types
 
-                if result == 'none' or not result:
-                    return []
+            client = genai.Client(api_key=config.GEMINI_API_KEY)
 
-                try:
-                    idx = int(result.replace('.', '').strip()) - 1
-                    if 0 <= idx < len(tokens):
-                        matched_token = tokens[idx].copy()
-                        matched_token['_match_score'] = 5.0
-                        matched_token['_matched_keyword'] = matched_token.get('symbol', '')
-                        matched_token['_match_type'] = 'ai_match'
-                        matched_token['_match_method'] = 'ai'  # 匹配逻辑
-                        matched_token['_token_source'] = 'exclusive'  # 代币来源：优质代币
-                        # 计算该代币的匹配耗时
-                        matched_token['_match_time_cost'] = int(time.time() * 1000) - start_time_ms
-                        # AI匹配成功也加入缓存
-                        symbol = (matched_token.get('symbol') or '').lower()
-                        if symbol:
-                            with matched_names_lock:
-                                matched_token_names.add(symbol)
-                        return [matched_token]
-                except:
-                    pass
+            # 构建 parts
+            parts = [types.Part.from_text(text=prompt)]
+
+            # 添加图片
+            if image_urls:
+                for url in image_urls[:3]:
+                    img_path = get_cached_image(url)
+                    if img_path:
+                        try:
+                            with open(img_path, 'rb') as f:
+                                img_data = f.read()
+                            mime_type = "image/jpeg"
+                            if img_path.lower().endswith('.png'):
+                                mime_type = "image/png"
+                            elif img_path.lower().endswith('.gif'):
+                                mime_type = "image/gif"
+                            parts.append(types.Part.from_bytes(data=img_data, mime_type=mime_type))
+                            print(f"[老币AI匹配] 添加图片: {img_path}", flush=True)
+                        except Exception as e:
+                            print(f"[老币AI匹配] 添加图片失败: {e}", flush=True)
+
+            contents = [types.Content(role="user", parts=parts)]
+
+            print(contents)
+            response = client.models.generate_content(
+                model="gemini-3-flash-preview",
+                contents=contents,
+            )
+            result = response.text.strip().lower()
+            print(f"[老币AI匹配] AI返回: {result}", flush=True)
+
+            if result == 'none' or not result:
+                print(f"[老币AI匹配] 无匹配", flush=True)
+                return []
+
+            try:
+                idx = int(result.replace('.', '').strip()) - 1
+                if 0 <= idx < len(tokens):
+                    matched_token = tokens[idx].copy()
+                    matched_token['_match_score'] = 5.0
+                    matched_token['_matched_keyword'] = matched_token.get('symbol', '')
+                    matched_token['_match_type'] = 'ai_match'
+                    matched_token['_match_method'] = 'ai'  # 匹配逻辑
+                    matched_token['_token_source'] = 'exclusive'  # 代币来源：优质代币
+                    # 计算该代币的匹配耗时
+                    matched_token['_match_time_cost'] = int(time.time() * 1000) - start_time_ms
+                    # AI匹配成功也加入缓存
+                    symbol = (matched_token.get('symbol') or '').lower()
+                    if symbol:
+                        with matched_names_lock:
+                            matched_token_names.add(symbol)
+                    return [matched_token]
+                else:
+                    print(f"[老币AI匹配] 返回序号 {idx+1} 超出范围", flush=True)
+            except ValueError:
+                print(f"[老币AI匹配] 无法解析AI返回: {result}", flush=True)
         except Exception as e:
+            log_error(f"老币AI匹配: {e}")
             print(f"[老币AI匹配] 异常: {e}", flush=True)
         return []
 
-    # 并行执行硬编码和AI匹配
+    # 根据设置决定是否执行硬编码匹配
     hardcoded_result = []
     ai_result = []
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        future_hardcoded = pool.submit(do_hardcoded_match)
-        future_ai = pool.submit(do_ai_match)
+    if stats['enable_hardcoded_match']:
+        # 硬编码开启：并行执行硬编码和AI匹配
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            future_hardcoded = pool.submit(do_hardcoded_match)
+            future_ai = pool.submit(do_ai_match)
 
-        hardcoded_result = future_hardcoded.result()
-        ai_result = future_ai.result()
+            hardcoded_result = future_hardcoded.result()
+            ai_result = future_ai.result()
 
-    # 优先返回硬编码结果
-    if hardcoded_result:
-        t = hardcoded_result[0]
-        print(f"[老币硬编码] -> {t['symbol']} ({t['name']}) 类型:{t['_match_type']}", flush=True)
-        return hardcoded_result
+        # 优先返回硬编码结果
+        if hardcoded_result:
+            t = hardcoded_result[0]
+            print(f"[老币硬编码] -> {t['symbol']} ({t['name']}) 类型:{t['_match_type']}", flush=True)
+            return hardcoded_result
+    else:
+        # 硬编码关闭：只执行AI匹配
+        ai_result = do_ai_match()
 
-    # 硬编码无结果时返回AI结果
+    # 返回AI结果
     if ai_result:
         t = ai_result[0]
         print(f"[老币AI匹配] -> {t['symbol']} ({t['name']})", flush=True)
@@ -561,7 +615,8 @@ stats = {
     'total_news': 0,
     'running': True,
     'last_match': None,
-    'errors': 0
+    'errors': 0,
+    'enable_hardcoded_match': True  # 硬编码匹配开关
 }
 
 # 代币列表
@@ -620,7 +675,16 @@ def log_attempt(author, content, keywords, tokens_in_window, matched_count, wind
             'keywords': keywords[:5] if keywords else [],
             'tokens_in_window': tokens_in_window,
             'matched': matched_count,
-            'window_tokens': window_token_names[:5] if window_token_names else []
+            'window_tokens': window_token_names[:5] if window_token_names else [],
+            # 新增：匹配任务状态
+            'match_tasks': {
+                'new_hardcoded': {'status': 'pending', 'result': None},      # 新币硬编码
+                'new_ai': {'status': 'pending', 'result': None},              # 新币AI
+                'exclusive_hardcoded': {'status': 'pending', 'result': None}, # 优质币硬编码
+                'exclusive_ai': {'status': 'pending', 'result': None}         # 优质币AI
+            },
+            # 新增：匹配到的代币列表
+            'matched_tokens': []
         })
         if len(recent_attempts) > MAX_LOG_SIZE:
             recent_attempts.pop(0)
@@ -634,6 +698,38 @@ def update_attempt(content, tokens_in_window, matched_count, window_token_names)
                 attempt['tokens_in_window'] = tokens_in_window
                 attempt['matched'] = matched_count
                 attempt['window_tokens'] = window_token_names[:5] if window_token_names else []
+                break
+
+
+def update_attempt_task(content, task_type, status, result=None, matched_token=None):
+    """更新撮合尝试的匹配任务状态
+
+    Args:
+        content: 推文内容（用于定位attempt）
+        task_type: 任务类型 ('new_hardcoded', 'new_ai', 'exclusive_hardcoded', 'exclusive_ai')
+        status: 状态 ('pending', 'running', 'success', 'no_match', 'skipped', 'error')
+        result: 结果描述
+        matched_token: 匹配到的代币信息 {'symbol': '', 'method': '', 'source': '', 'time_cost': 0}
+    """
+    with log_lock:
+        for attempt in recent_attempts:
+            if attempt['content'] == content[:100]:
+                if 'match_tasks' not in attempt:
+                    attempt['match_tasks'] = {
+                        'new_hardcoded': {'status': 'pending', 'result': None},
+                        'new_ai': {'status': 'pending', 'result': None},
+                        'exclusive_hardcoded': {'status': 'pending', 'result': None},
+                        'exclusive_ai': {'status': 'pending', 'result': None}
+                    }
+                if 'matched_tokens' not in attempt:
+                    attempt['matched_tokens'] = []
+
+                attempt['match_tasks'][task_type] = {'status': status, 'result': result}
+
+                # 如果有匹配到的代币，添加到列表
+                if matched_token:
+                    attempt['matched_tokens'].append(matched_token)
+                    attempt['matched'] = len(attempt['matched_tokens'])
                 break
 
 
@@ -967,7 +1063,7 @@ def calculate_match_score(keywords, symbol, name):
     return max_score, matched_keyword, match_type
 
 
-def match_tokens(news_time, tweet_text):
+def match_tokens(news_time, tweet_text, image_urls=None):
     """匹配时间窗口内的代币，硬编码和AI并行，优先硬编码结果"""
     from concurrent.futures import ThreadPoolExecutor
 
@@ -1050,14 +1146,22 @@ def match_tokens(news_time, tweet_text):
         return matched
 
     def do_ai_match():
-        """AI匹配：让AI判断推文和代币的关联"""
+        """AI匹配：让AI判断推文和代币的关联（支持图片）"""
         if not window_tokens:
+            print(f"[新币AI匹配] 跳过: 窗口内无代币", flush=True)
+            return []
+
+        if not config.GEMINI_API_KEY:
+            print(f"[新币AI匹配] 跳过: 未配置 GEMINI_API_KEY", flush=True)
             return []
 
         token_list_str = [f"{i+1}. symbol:{t.get('tokenSymbol','')} name:{t.get('tokenName','')}" for i, t in enumerate(window_tokens[:30])]
         token_str = "\n".join(token_list_str)
 
-        prompt = f"""判断以下推文是否在提及代币列表中的某个代币。
+        has_images = image_urls and len(image_urls) > 0
+        image_hint = "（注意：推文包含图片，请结合图片内容判断）" if has_images else ""
+
+        prompt = f"""判断以下推文是否在提及代币列表中的某个代币。{image_hint}
 
 推文内容: {tweet_text[:500]}
 
@@ -1066,68 +1170,107 @@ def match_tokens(news_time, tweet_text):
 
 规则:
 - 推文需要与代币的 symbol 或 name 有明确关联（包含、谐音、缩写等）
+- 如果推文有图片，也要分析图片中是否包含代币相关信息
 - 如果有匹配，返回代币序号（如 "1" 或 "3"）
 - 如果多个匹配，返回最相关的一个序号
 - 如果没有任何匹配，返回 "none"
 
 只返回序号或 "none"，不要其他内容："""
 
+        print(f"[新币AI匹配] 开始匹配，窗口代币: {len(window_tokens[:30])} 个，图片: {len(image_urls) if image_urls else 0} 张", flush=True)
+
         try:
-            if config.GEMINI_API_KEY:
-                from google import genai
-                client = genai.Client(api_key=config.GEMINI_API_KEY)
-                response = client.models.generate_content(
-                    model="gemini-2.0-flash-lite",
-                    contents=prompt,
-                )
-                result = response.text.strip().lower()
+            from google import genai
+            from google.genai import types
 
-                if result == 'none' or not result:
-                    return []
+            client = genai.Client(api_key=config.GEMINI_API_KEY)
 
-                try:
-                    idx = int(result.replace('.', '').strip()) - 1
-                    if 0 <= idx < len(window_tokens):
-                        token_copy = window_tokens[idx].copy()
-                        token_copy['_match_score'] = 5.0
-                        token_copy['_matched_keyword'] = token_copy.get('tokenSymbol', '')
-                        token_copy['_match_type'] = 'ai_match'
-                        token_copy['_match_method'] = 'ai'  # 匹配逻辑
-                        token_copy['_token_source'] = 'new'  # 代币来源：新币
-                        # 每个代币独立计算耗时：从代币创建时间到匹配成功
-                        create_time = token_copy.get('createTime', 0)
-                        token_copy['_match_time_cost'] = int(time.time() * 1000) - create_time if create_time else 0
-                        holders = float(token_copy.get('holders', 0) or 0)
-                        token_copy['_final_score'] = 5.0 * holders
-                        # AI匹配成功也加入缓存
-                        symbol = (token_copy.get('tokenSymbol') or '').lower()
-                        if symbol:
-                            with matched_names_lock:
-                                matched_token_names.add(symbol)
-                        return [token_copy]
-                except:
-                    pass
+            # 构建 parts
+            parts = [types.Part.from_text(text=prompt)]
+
+            # 添加图片
+            if image_urls:
+                for url in image_urls[:3]:
+                    img_path = get_cached_image(url)
+                    if img_path:
+                        try:
+                            with open(img_path, 'rb') as f:
+                                img_data = f.read()
+                            mime_type = "image/jpeg"
+                            if img_path.lower().endswith('.png'):
+                                mime_type = "image/png"
+                            elif img_path.lower().endswith('.gif'):
+                                mime_type = "image/gif"
+                            parts.append(types.Part.from_bytes(data=img_data, mime_type=mime_type))
+                            print(f"[新币AI匹配] 添加图片: {img_path}", flush=True)
+                        except Exception as e:
+                            print(f"[新币AI匹配] 添加图片失败: {e}", flush=True)
+
+            contents = [types.Content(role="user", parts=parts)]
+
+            print(contents)
+            response = client.models.generate_content(
+                model="gemini-3-flash-preview",
+                contents=contents,
+            )
+            result = response.text.strip().lower()
+            print(f"[新币AI匹配] AI返回: {result}", flush=True)
+
+            if result == 'none' or not result:
+                print(f"[新币AI匹配] 无匹配", flush=True)
+                return []
+
+            try:
+                idx = int(result.replace('.', '').strip()) - 1
+                if 0 <= idx < len(window_tokens):
+                    token_copy = window_tokens[idx].copy()
+                    token_copy['_match_score'] = 5.0
+                    token_copy['_matched_keyword'] = token_copy.get('tokenSymbol', '')
+                    token_copy['_match_type'] = 'ai_match'
+                    token_copy['_match_method'] = 'ai'  # 匹配逻辑
+                    token_copy['_token_source'] = 'new'  # 代币来源：新币
+                    # 每个代币独立计算耗时：从代币创建时间到匹配成功
+                    create_time = token_copy.get('createTime', 0)
+                    token_copy['_match_time_cost'] = int(time.time() * 1000) - create_time if create_time else 0
+                    holders = float(token_copy.get('holders', 0) or 0)
+                    token_copy['_final_score'] = 5.0 * holders
+                    # AI匹配成功也加入缓存
+                    symbol = (token_copy.get('tokenSymbol') or '').lower()
+                    if symbol:
+                        with matched_names_lock:
+                            matched_token_names.add(symbol)
+                    return [token_copy]
+                else:
+                    print(f"[新币AI匹配] 返回序号 {idx+1} 超出范围", flush=True)
+            except ValueError:
+                print(f"[新币AI匹配] 无法解析AI返回: {result}", flush=True)
         except Exception as e:
+            log_error(f"新币AI匹配: {e}")
             print(f"[新币AI匹配] 异常: {e}", flush=True)
         return []
 
-    # 并行执行硬编码和AI匹配
+    # 根据设置决定是否执行硬编码匹配
     hardcoded_result = []
     ai_result = []
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        future_hardcoded = pool.submit(do_hardcoded_match)
-        future_ai = pool.submit(do_ai_match)
+    if stats['enable_hardcoded_match']:
+        # 硬编码开启：并行执行硬编码和AI匹配
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            future_hardcoded = pool.submit(do_hardcoded_match)
+            future_ai = pool.submit(do_ai_match)
 
-        hardcoded_result = future_hardcoded.result()
-        ai_result = future_ai.result()
+            hardcoded_result = future_hardcoded.result()
+            ai_result = future_ai.result()
 
-    # 优先返回硬编码结果
-    if hardcoded_result:
-        print(f"[新币硬编码] 匹配到 {len(hardcoded_result)} 个", flush=True)
-        return hardcoded_result, tokens_in_window, window_token_names
+        # 优先返回硬编码结果
+        if hardcoded_result:
+            print(f"[新币硬编码] 匹配到 {len(hardcoded_result)} 个", flush=True)
+            return hardcoded_result, tokens_in_window, window_token_names
+    else:
+        # 硬编码关闭：只执行AI匹配
+        ai_result = do_ai_match()
 
-    # 硬编码无结果时返回AI结果
+    # 返回AI结果
     if ai_result:
         t = ai_result[0]
         print(f"[新币AI匹配] -> {t.get('tokenSymbol')} ({t.get('tokenName')})", flush=True)
@@ -1164,13 +1307,19 @@ def send_to_tracker(news_data, keywords, matched_tokens):
 def push_to_telegram(news_data, keywords, matched_tokens):
     """推送撮合结果到 Telegram"""
     try:
-        # 提取代币信息（symbol + CA）
+        # 提取代币信息（symbol + CA + 匹配信息）
         tokens_info = []
         for t in matched_tokens[:5]:
             symbol = t.get('tokenSymbol', '')
             ca = t.get('tokenAddress', '')
             if symbol and ca:
-                tokens_info.append({'symbol': symbol, 'ca': ca})
+                tokens_info.append({
+                    'symbol': symbol,
+                    'ca': ca,
+                    'source': t.get('_token_source', ''),  # new/old
+                    'method': t.get('_match_method', ''),  # ai/hardcoded
+                    'match_type': t.get('_match_type', '')
+                })
 
         if not tokens_info:
             return
@@ -1211,7 +1360,7 @@ def push_to_telegram(news_data, keywords, matched_tokens):
         pass
 
 
-def add_to_pending(news_data, tweet_text, matched_ids=None):
+def add_to_pending(news_data, tweet_text, matched_ids=None, image_urls=None):
     """添加到待检测队列"""
     news_time = news_data.get('time', 0)
     expire_time = news_time + config.TIME_WINDOW_MS / 1000  # 窗口期结束时间（秒）
@@ -1224,11 +1373,12 @@ def add_to_pending(news_data, tweet_text, matched_ids=None):
         pending_news.append({
             'news_data': news_data,
             'tweet_text': tweet_text,
+            'image_urls': image_urls or [],
             'expire_time': expire_time,
             'matched_token_ids': set(valid_ids),
             'status': 'pending'
         })
-        print(f"[待检测] 添加 @{news_data.get('author')} 到队列，初始匹配 {initial_count} 个，窗口期至 {expire_time}", flush=True)
+        print(f"[待检测] 添加 @{news_data.get('author')} 到队列，初始匹配 {initial_count} 个，图片 {len(image_urls or [])} 张，窗口期至 {expire_time}", flush=True)
 
 
 def check_pending_news():
@@ -1292,25 +1442,74 @@ def check_pending_news():
                         match_type = None
                         matched_word = None
 
-                        # 优先检查：代币名称是否已在缓存中（同名直接推送）
+                        # 优先检查：代币名称是否已在缓存中（同名直接推送，不受开关影响）
                         with matched_names_lock:
                             if symbol and symbol in matched_token_names:
                                 score = 5.0
                                 match_type = "缓存命中"
                                 matched_word = symbol
 
-                        # 硬编码匹配：检查推文中是否包含代币 symbol 或 name
-                        if score == 0 and symbol and len(symbol) >= 2 and symbol in tweet_lower:
-                            score = 5.0
-                            match_type = "推文包含symbol"
-                            matched_word = symbol
-                        # 检查 name（支持分词匹配）
-                        elif score == 0:
-                            m, word, mtype, sc = match_name_in_tweet(name, tweet_lower)
-                            if m:
-                                score = sc
-                                match_type = mtype
-                                matched_word = word
+                        # 硬编码匹配
+                        if stats['enable_hardcoded_match'] and score == 0:
+                            # 检查推文中是否包含代币 symbol 或 name
+                            if symbol and len(symbol) >= 2 and symbol in tweet_lower:
+                                score = 5.0
+                                match_type = "推文包含symbol"
+                                matched_word = symbol
+                            # 检查 name（支持分词匹配）
+                            else:
+                                m, word, mtype, sc = match_name_in_tweet(name, tweet_lower)
+                                if m:
+                                    score = sc
+                                    match_type = mtype
+                                    matched_word = word
+
+                        # AI 匹配（硬编码失败或关闭时兜底，支持图片）
+                        if score == 0 and config.GEMINI_API_KEY:
+                            try:
+                                from google import genai
+                                from google.genai import types
+
+                                pending_images = pending.get('image_urls', [])
+                                has_images = len(pending_images) > 0
+                                image_hint = "（注意：推文包含图片，请结合图片内容判断）" if has_images else ""
+
+                                prompt = f"""判断推文是否提及这个代币。{image_hint}
+推文: {tweet_text[:300]}
+代币: symbol={token.get('tokenSymbol','')} name={token.get('tokenName','')}
+规则: 推文需要与代币有明确关联（包含、谐音、缩写、翻译等），也要分析图片内容
+只回答 yes 或 no:"""
+
+                                client = genai.Client(api_key=config.GEMINI_API_KEY)
+
+                                # 构建 parts
+                                parts = [types.Part.from_text(text=prompt)]
+
+                                # 添加图片
+                                if pending_images:
+                                    for url in pending_images[:2]:
+                                        img_path = get_cached_image(url)
+                                        if img_path:
+                                            try:
+                                                with open(img_path, 'rb') as f:
+                                                    img_data = f.read()
+                                                mime_type = "image/jpeg"
+                                                if img_path.lower().endswith('.png'):
+                                                    mime_type = "image/png"
+                                                parts.append(types.Part.from_bytes(data=img_data, mime_type=mime_type))
+                                            except:
+                                                pass
+
+                                contents = [types.Content(role="user", parts=parts)]
+                                response = client.models.generate_content(model="gemini-3-flash-preview", contents=contents)
+                                result = response.text.strip().lower()
+                                if 'yes' in result:
+                                    score = 5.0
+                                    match_type = "ai_match"
+                                    matched_word = symbol or name
+                                    print(f"[持续检测AI] 匹配 {symbol or name} (图片:{len(pending_images)})", flush=True)
+                            except Exception as e:
+                                log_error(f"持续检测AI: {e}")
 
                         if score > 0:
                             pending['matched_token_ids'].add(token_id)
@@ -1325,7 +1524,7 @@ def check_pending_news():
                             token_copy['_match_score'] = score
                             token_copy['_matched_keyword'] = matched_word
                             token_copy['_match_type'] = match_type
-                            token_copy['_match_method'] = 'hardcoded'  # 匹配逻辑
+                            token_copy['_match_method'] = 'ai' if match_type == 'ai_match' else 'hardcoded'
                             token_copy['_token_source'] = 'new'  # 代币来源：新币（持续检测）
                             # 计算匹配耗时：从推文时间到当前时间
                             news_time_ms = news_time * 1000 if news_time < 10000000000 else news_time
@@ -1404,7 +1603,11 @@ def process_news_item(news_data, full_content, all_images):
         # 并行启动：新币匹配 + 老币搜索（各自完成后立即推送）
         def match_and_send_new():
             """匹配新币，完成后立即推送"""
-            matched_tokens, tokens_in_window, window_token_names = match_tokens(news_time, tweet_text)
+            # 根据设置决定任务状态
+            hardcoded_enabled = stats['enable_hardcoded_match']
+
+            matched_tokens, tokens_in_window, window_token_names = match_tokens(news_time, tweet_text, all_images)
+
             if matched_tokens:
                 # 每个代币已在 match_tokens 中计算独立耗时
                 stats['total_matches'] += 1
@@ -1415,15 +1618,39 @@ def process_news_item(news_data, full_content, all_images):
                 print(f"[新币] @{author}: {len(matched_tokens)} 个匹配 ({', '.join(time_costs)})", flush=True)
                 send_to_tracker(news_data, [], matched_tokens)
 
+                # 更新任务状态
+                for t in matched_tokens:
+                    method = t.get('_match_method', 'hardcoded')
+                    task_type = 'new_hardcoded' if method == 'hardcoded' else 'new_ai'
+                    update_attempt_task(content, task_type, 'success', t.get('tokenSymbol'), {
+                        'symbol': t.get('tokenSymbol', ''),
+                        'method': method,
+                        'source': 'new',
+                        'time_cost': t.get('_match_time_cost', 0)
+                    })
+                    # 另一个任务标记为 no_match
+                    other_task = 'new_ai' if method == 'hardcoded' else 'new_hardcoded'
+                    if hardcoded_enabled or other_task == 'new_ai':
+                        update_attempt_task(content, other_task, 'no_match')
+            else:
+                # 无匹配
+                if hardcoded_enabled:
+                    update_attempt_task(content, 'new_hardcoded', 'no_match')
+                else:
+                    update_attempt_task(content, 'new_hardcoded', 'skipped')
+                update_attempt_task(content, 'new_ai', 'no_match')
+
             # 加入持续检测队列
             window_end = news_time * 1000 + config.TIME_WINDOW_MS
             if current_time_ms < window_end:
                 matched_ids = [t.get('tokenAddress') for t in matched_tokens] if matched_tokens else []
-                add_to_pending(news_data, tweet_text, matched_ids)
+                add_to_pending(news_data, tweet_text, matched_ids, all_images)
 
         def search_and_send_old():
             """在优质代币中搜索匹配"""
-            matched_tokens = match_exclusive_with_ai(tweet_text, start_time_ms=receive_time_ms)
+            hardcoded_enabled = stats['enable_hardcoded_match']
+
+            matched_tokens = match_exclusive_with_ai(tweet_text, start_time_ms=receive_time_ms, image_urls=all_images)
 
             if matched_tokens:
                 stats['total_matches'] += 1
@@ -1458,6 +1685,28 @@ def process_news_item(news_data, full_content, all_images):
                     '_match_time_cost': t.get('_match_time_cost', 0)
                 } for t in matched_tokens]
                 send_to_tracker(news_data, [], formatted)
+
+                # 更新任务状态
+                for t in matched_tokens:
+                    method = t.get('_match_method', 'ai')
+                    task_type = 'exclusive_hardcoded' if method == 'hardcoded' else 'exclusive_ai'
+                    update_attempt_task(content, task_type, 'success', t.get('symbol'), {
+                        'symbol': t.get('symbol', ''),
+                        'method': method,
+                        'source': 'exclusive',
+                        'time_cost': t.get('_match_time_cost', 0)
+                    })
+                    # 另一个任务标记为 no_match
+                    other_task = 'exclusive_ai' if method == 'hardcoded' else 'exclusive_hardcoded'
+                    if hardcoded_enabled or other_task == 'exclusive_ai':
+                        update_attempt_task(content, other_task, 'no_match')
+            else:
+                # 无匹配
+                if hardcoded_enabled:
+                    update_attempt_task(content, 'exclusive_hardcoded', 'no_match')
+                else:
+                    update_attempt_task(content, 'exclusive_hardcoded', 'skipped')
+                update_attempt_task(content, 'exclusive_ai', 'no_match')
 
         # 并行执行，不等待
         executor.submit(match_and_send_new)
@@ -1567,7 +1816,8 @@ def status():
         'tokens_cached': len(token_list),
         'pending_detection': pending_count,
         'last_match': stats['last_match'],
-        'errors': stats['errors']
+        'errors': stats['errors'],
+        'enable_hardcoded_match': stats['enable_hardcoded_match']
     })
 
 
@@ -1599,6 +1849,21 @@ def recent():
 @app.route('/health')
 def health():
     return jsonify({'status': 'ok'})
+
+
+@app.route('/hardcoded_match', methods=['GET', 'POST'])
+def hardcoded_match_toggle():
+    """获取或设置硬编码匹配开关"""
+    if request.method == 'GET':
+        return jsonify({'enabled': stats['enable_hardcoded_match']})
+
+    data = request.get_json() or {}
+    enabled = data.get('enabled')
+    if enabled is not None:
+        stats['enable_hardcoded_match'] = bool(enabled)
+        status_str = '开启' if stats['enable_hardcoded_match'] else '关闭'
+        print(f"[设置] 硬编码匹配已{status_str}", flush=True)
+    return jsonify({'enabled': stats['enable_hardcoded_match']})
 
 
 @app.route('/extract_keywords', methods=['POST'])

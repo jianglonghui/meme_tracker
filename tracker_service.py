@@ -27,6 +27,19 @@ stats = {
 tracking_tasks = []
 tracking_lock = threading.Lock()
 
+# 错误日志
+MAX_LOG_SIZE = 50
+recent_errors = []
+log_lock = threading.Lock()
+
+def log_error(msg):
+    """记录错误"""
+    with log_lock:
+        recent_errors.append({'time': time.time(), 'msg': msg})
+        if len(recent_errors) > MAX_LOG_SIZE:
+            recent_errors.pop(0)
+    stats['errors'] += 1
+
 # 内存中的追踪数据（追踪完成后才决定是否写入数据库）
 # key: match_id (临时ID), value: {news_data, keywords, tokens, tracking_data}
 pending_records = {}
@@ -97,6 +110,19 @@ def init_db():
         cursor.execute('ALTER TABLE matched_tokens ADD COLUMN match_time_cost INTEGER DEFAULT 0')
     except:
         pass
+
+    # 兼容旧表：添加 is_best 字段（是否最佳代币）
+    try:
+        cursor.execute('ALTER TABLE matched_tokens ADD COLUMN is_best INTEGER DEFAULT 0')
+    except:
+        pass
+
+    # 兼容旧表：添加各时间点市值字段
+    for col in ['mcap_1min', 'mcap_5min', 'mcap_10min', 'change_1min', 'change_5min', 'change_10min']:
+        try:
+            cursor.execute(f'ALTER TABLE matched_tokens ADD COLUMN {col} REAL DEFAULT 0')
+        except:
+            pass
 
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS market_cap_tracking (
@@ -180,166 +206,17 @@ def get_token_current_data(token_address):
             return -2  # HTTP错误
     except Exception as e:
         print(f"[DexScreener] {token_address} - 请求失败: {e}", flush=True)
-        stats['errors'] += 1
+        log_error(f"DexScreener {token_address[:10]}... 请求失败: {e}")
         return -3  # 网络异常
     return -1
 
 
 def save_match_record(news_data, keywords, matched_tokens):
-    """保存匹配记录到内存，开始追踪（不写入数据库）"""
-    global temp_match_id
-
+    """保存匹配记录到数据库，开始追踪"""
     if not matched_tokens:
         return None
 
-    # 生成临时 ID
-    with pending_lock:
-        temp_match_id += 1
-        match_id = temp_match_id
-
     top5 = matched_tokens[:5]
-    tokens_data = []
-
-    for rank, token in enumerate(top5, 1):
-        # 判断来源：有 source=binance_search 的是老币，否则是新币
-        source = token.get('source', 'new')
-        if source == 'binance_search':
-            source = 'old'
-        else:
-            source = 'new'
-
-        tokens_data.append({
-            'rank': rank,
-            'address': token.get('tokenAddress', ''),
-            'symbol': token.get('tokenSymbol', ''),
-            'name': token.get('tokenName', ''),
-            'chain': token.get('chain', 'BSC'),
-            'price': token.get('price', '0'),
-            'initial_mc': float(token.get('marketCap', 0) or 0),
-            'holders': int(token.get('holders', 0) or 0),
-            'match_score': token.get('_match_score', 0),
-            'match_keyword': token.get('_matched_keyword', ''),
-            'match_type': token.get('_match_type', ''),
-            'match_method': token.get('_match_method', 'hardcoded'),  # 匹配逻辑：hardcoded/ai
-            'match_time_cost': token.get('_match_time_cost', 0),  # 匹配耗时（毫秒）
-            'final_score': token.get('_final_score', 0),
-            'source': source,  # 代币来源：new/exclusive
-            'tracking': {}  # {60: {mc, change_pct, price}, 300: ..., 600: ...}
-        })
-
-    # 保存到内存
-    with pending_lock:
-        pending_records[match_id] = {
-            'news_data': news_data,
-            'keywords': keywords,
-            'tokens': tokens_data
-        }
-
-    stats['total_matches'] += 1
-    schedule_tracking(match_id)
-    print(f"[追踪] 开始追踪 #{match_id} ({len(tokens_data)} 个代币)", flush=True)
-    return match_id
-
-
-def schedule_tracking(match_id):
-    """安排追踪任务"""
-    current_time = time.time()
-    with tracking_lock:
-        for offset in config.TRACK_INTERVALS:
-            tracking_tasks.append({
-                'match_id': match_id,
-                'time_offset': offset,
-                'execute_at': current_time + offset
-            })
-
-
-def track_market_cap(match_id, time_offset):
-    """追踪市值（内存中）"""
-    with pending_lock:
-        record = pending_records.get(match_id)
-        if not record:
-            return
-
-        for token in record['tokens']:
-            address = token['address']
-            symbol = token['symbol']
-            initial_mc = token['initial_mc']
-
-            result = get_token_current_data(address)
-
-            if isinstance(result, dict):
-                current_mc = result['market_cap']
-                change_pct = ((current_mc - initial_mc) / initial_mc * 100) if initial_mc > 0 else 0
-                token['tracking'][time_offset] = {
-                    'mc': current_mc,
-                    'change_pct': change_pct,
-                    'price': result['price']
-                }
-                stats['total_tracked'] += 1
-                print(f"[追踪] {symbol} ({time_offset}s) - MC: {current_mc:.0f} ({change_pct:+.1f}%)", flush=True)
-            else:
-                # 错误码
-                token['tracking'][time_offset] = {
-                    'mc': result,
-                    'change_pct': 0,
-                    'price': ''
-                }
-                stats['errors'] += 1
-
-
-def calculate_performance_score(match_id):
-    """
-    追踪完成后判断是否达标，达标才写入数据库：
-    - 新币：市值 >= 10万 → 写入数据库
-    - 老币：涨幅 >= 10% → 写入数据库
-    """
-    with pending_lock:
-        record = pending_records.pop(match_id, None)
-
-    if not record:
-        return
-
-    news_data = record['news_data']
-    keywords = record['keywords']
-    tokens = record['tokens']
-
-    # 筛选达标代币
-    qualified_tokens = []
-    for token in tokens:
-        tracking = token.get('tracking', {})
-        final_data = tracking.get(600, {})
-        final_mc = final_data.get('mc', token['initial_mc'])
-        change_pct = final_data.get('change_pct', 0)
-
-        # 跳过错误数据
-        if isinstance(final_mc, int) and final_mc < 0:
-            continue
-
-        # 计算表现分数
-        c60 = tracking.get(60, {}).get('change_pct', 0)
-        c300 = tracking.get(300, {}).get('change_pct', 0)
-        c600 = change_pct
-        score = c60 * 0.2 + c300 * 0.3 + c600 * 0.5
-
-        token['final_mc'] = final_mc
-        token['change_pct'] = change_pct
-        token['score'] = score
-
-        if token['source'] == 'old':
-            # 老币：涨幅 >= 10%
-            if change_pct >= config.MIN_CHANGE_TO_RECORD:
-                qualified_tokens.append(token)
-                print(f"[达标-老币] {token['symbol']} 涨幅 {change_pct:.1f}%", flush=True)
-        else:
-            # 新币：市值 >= 10万
-            if final_mc >= config.MIN_MCAP_TO_KEEP:
-                qualified_tokens.append(token)
-                print(f"[达标-新币] {token['symbol']} 市值 {final_mc:.0f}", flush=True)
-
-    # 没有达标代币，不写入数据库
-    if not qualified_tokens:
-        print(f"[追踪完成] #{match_id} 无达标代币，不写入数据库", flush=True)
-        return
 
     # 写入数据库
     conn = sqlite3.connect(config.DB_PATH)
@@ -371,46 +248,223 @@ def calculate_performance_score(match_id):
     ))
     db_match_id = cursor.lastrowid
 
-    # 2. 写入 matched_tokens 和 market_cap_tracking
-    for token in qualified_tokens:
+    # 2. 写入 matched_tokens
+    tokens_data = []
+    for rank, token in enumerate(top5, 1):
+        source = token.get('source', 'new')
+        # 老币来源: binance_search, exclusive, old
+        if source in ('binance_search', 'exclusive', 'old'):
+            source = 'old'
+        else:
+            source = 'new'
+
+        initial_mc = float(token.get('marketCap', 0) or 0)
+
         cursor.execute('''
             INSERT INTO matched_tokens
             (match_id, rank, token_address, token_symbol, token_name, chain,
              initial_price, initial_market_cap, initial_holders,
-             match_score, match_keyword, match_type, final_score, source, match_method, match_time_cost)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             match_score, match_keyword, match_type, final_score, source, match_method, match_time_cost,
+             is_best, mcap_1min, mcap_5min, mcap_10min, change_1min, change_5min, change_10min)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
-            db_match_id, token['rank'], token['address'], token['symbol'],
-            token['name'], token['chain'], token['price'], token['initial_mc'],
-            token['holders'], token['match_score'], token['match_keyword'],
-            token['match_type'], token['final_score'], token['source'],
-            token.get('match_method', 'hardcoded'), token.get('match_time_cost', 0)
+            db_match_id, rank,
+            token.get('tokenAddress', ''),
+            token.get('tokenSymbol', ''),
+            token.get('tokenName', ''),
+            token.get('chain', 'BSC'),
+            token.get('price', '0'),
+            initial_mc,
+            int(token.get('holders', 0) or 0),
+            token.get('_match_score', 0),
+            token.get('_matched_keyword', ''),
+            token.get('_match_type', ''),
+            0,  # final_score 初始为0
+            source,
+            token.get('_match_method', 'hardcoded'),
+            token.get('_match_time_cost', 0),
+            0, 0, 0, 0, 0, 0, 0  # is_best 和市值字段初始为0
         ))
-        token_id = cursor.lastrowid
+        token_db_id = cursor.lastrowid
 
-        # 写入追踪数据
-        for offset, data in token.get('tracking', {}).items():
-            cursor.execute('''
-                INSERT INTO market_cap_tracking
-                (matched_token_id, time_offset, market_cap, market_cap_change_pct, price)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (token_id, offset, data['mc'], data['change_pct'], data['price']))
+        tokens_data.append({
+            'db_id': token_db_id,
+            'address': token.get('tokenAddress', ''),
+            'symbol': token.get('tokenSymbol', ''),
+            'initial_mc': initial_mc,
+            'source': source,
+            'match_keyword': token.get('_matched_keyword', ''),
+            'match_type': token.get('_match_type', ''),
+            'match_method': token.get('_match_method', 'hardcoded'),
+            'match_time_cost': token.get('_match_time_cost', 0)
+        })
 
-    # 3. 写入 top_performers
-    qualified_tokens.sort(key=lambda x: x['score'], reverse=True)
-    for rank, token in enumerate(qualified_tokens[:2], 1):
+    conn.commit()
+    conn.close()
+
+    # 保存到内存用于追踪
+    with pending_lock:
+        pending_records[db_match_id] = {
+            'news_data': news_data,
+            'keywords': keywords,
+            'tokens': tokens_data
+        }
+
+    stats['total_matches'] += 1
+    schedule_tracking(db_match_id)
+    print(f"[写入数据库] #{db_match_id} ({len(tokens_data)} 个代币)", flush=True)
+    return db_match_id
+
+
+def schedule_tracking(match_id):
+    """安排追踪任务"""
+    current_time = time.time()
+    with tracking_lock:
+        for offset in config.TRACK_INTERVALS:
+            tracking_tasks.append({
+                'match_id': match_id,
+                'time_offset': offset,
+                'execute_at': current_time + offset
+            })
+
+
+def track_market_cap(match_id, time_offset):
+    """追踪市值并更新数据库"""
+    with pending_lock:
+        record = pending_records.get(match_id)
+        if not record:
+            return
+
+    # 时间点对应的数据库字段
+    field_map = {
+        60: ('mcap_1min', 'change_1min'),
+        300: ('mcap_5min', 'change_5min'),
+        600: ('mcap_10min', 'change_10min')
+    }
+
+    conn = sqlite3.connect(config.DB_PATH)
+    cursor = conn.cursor()
+
+    for token in record['tokens']:
+        db_id = token['db_id']
+        address = token['address']
+        symbol = token['symbol']
+        initial_mc = token['initial_mc']
+
+        result = get_token_current_data(address)
+
+        if isinstance(result, dict):
+            current_mc = result['market_cap']
+            change_pct = ((current_mc - initial_mc) / initial_mc * 100) if initial_mc > 0 else 0
+
+            # 更新数据库
+            if time_offset in field_map:
+                mcap_field, change_field = field_map[time_offset]
+                cursor.execute(f'''
+                    UPDATE matched_tokens SET {mcap_field} = ?, {change_field} = ?
+                    WHERE id = ?
+                ''', (current_mc, change_pct, db_id))
+
+            stats['total_tracked'] += 1
+            print(f"[追踪] {symbol} ({time_offset}s) - MC: {current_mc:.0f} ({change_pct:+.1f}%)", flush=True)
+        else:
+            log_error(f"追踪 {symbol} ({time_offset}s) 失败: {result}")
+            print(f"[追踪] {symbol} ({time_offset}s) - 错误: {result}", flush=True)
+
+    conn.commit()
+    conn.close()
+
+
+def calculate_performance_score(match_id):
+    """
+    追踪完成后计算得分和是否达标，更新数据库
+    达标代币标记为 is_best=1：
+    - 新币：市值 >= 10万
+    - 老币：涨幅 >= 10%
+    """
+    # 从内存获取并移除
+    with pending_lock:
+        record = pending_records.pop(match_id, None)
+
+    if not record:
+        return
+
+    tokens = record['tokens']
+
+    conn = sqlite3.connect(config.DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    best_tokens = []
+
+    for token in tokens:
+        db_id = token['db_id']
+        symbol = token['symbol']
+        initial_mc = token['initial_mc']
+        source = token['source']
+
+        # 从数据库读取市值数据
+        cursor.execute('''
+            SELECT mcap_1min, mcap_5min, mcap_10min, change_1min, change_5min, change_10min,
+                   token_address, token_name, chain
+            FROM matched_tokens WHERE id = ?
+        ''', (db_id,))
+        row = cursor.fetchone()
+        if not row:
+            continue
+
+        c1 = row['change_1min'] or 0
+        c5 = row['change_5min'] or 0
+        c10 = row['change_10min'] or 0
+        mcap_10min = row['mcap_10min'] or 0
+
+        # 计算得分
+        score = c1 * 0.2 + c5 * 0.3 + c10 * 0.5
+
+        # 判断是否达标（得分必须为正）
+        is_best = 0
+        if score > 0:
+            if source == 'old':
+                if c10 >= config.MIN_CHANGE_TO_RECORD:
+                    is_best = 1
+                    print(f"[达标-老币] {symbol} 涨幅 {c10:.1f}%", flush=True)
+            else:
+                if mcap_10min >= config.MIN_MCAP_TO_KEEP:
+                    is_best = 1
+                    print(f"[达标-新币] {symbol} 市值 {mcap_10min:.0f}", flush=True)
+
+        # 更新数据库
+        cursor.execute('''
+            UPDATE matched_tokens SET final_score = ?, is_best = ? WHERE id = ?
+        ''', (score, is_best, db_id))
+
+        if is_best:
+            best_tokens.append({
+                'db_id': db_id,
+                'address': row['token_address'],
+                'symbol': symbol,
+                'name': row['token_name'],
+                'chain': row['chain'],
+                'initial_mc': initial_mc,
+                'final_mc': mcap_10min,
+                'change_pct': c10,
+                'score': score
+            })
+
+    # 写入 top_performers
+    best_tokens.sort(key=lambda x: x['score'], reverse=True)
+    for rank, t in enumerate(best_tokens[:2], 1):
         cursor.execute('''
             INSERT INTO top_performers
             (match_id, performance_rank, token_address, token_symbol, token_name, chain,
              initial_market_cap, final_market_cap, market_cap_change_pct, performance_score)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (db_match_id, rank, token['address'], token['symbol'], token['name'],
-              token['chain'], token['initial_mc'], token['final_mc'],
-              token['change_pct'], token['score']))
+        ''', (match_id, rank, t['address'], t['symbol'], t['name'],
+              t['chain'], t['initial_mc'], t['final_mc'], t['change_pct'], t['score']))
 
     conn.commit()
     conn.close()
-    print(f"[写入数据库] #{db_match_id} 共 {len(qualified_tokens)} 个达标代币", flush=True)
+    print(f"[追踪完成] #{match_id} {len(best_tokens)} 个达标", flush=True)
 
 
 def tracking_worker():
@@ -439,47 +493,44 @@ def tracking_worker():
 
 
 def query_best_tokens(limit=10):
-    """查询推文及最佳代币"""
+    """查询有最佳代币的推文记录（只返回有 is_best=1 代币的记录）"""
     conn = sqlite3.connect(config.DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
+    # 只查询有 is_best=1 代币的记录
     cursor.execute('''
-        SELECT id, news_time, news_author, news_author_name, news_avatar, news_type,
-               news_content, news_images, news_videos,
-               ref_author, ref_author_name, ref_avatar, ref_content, ref_images,
-               keywords, created_at
-        FROM match_records ORDER BY created_at DESC LIMIT ?
+        SELECT DISTINCT m.id, m.news_time, m.news_author, m.news_author_name, m.news_avatar, m.news_type,
+               m.news_content, m.news_images, m.news_videos,
+               m.ref_author, m.ref_author_name, m.ref_avatar, m.ref_content, m.ref_images,
+               m.keywords, m.created_at
+        FROM match_records m
+        INNER JOIN matched_tokens t ON m.id = t.match_id AND t.is_best = 1
+        ORDER BY m.created_at DESC LIMIT ?
     ''', (limit,))
     records = cursor.fetchall()
+
+    # 解析 JSON 字段
+    def parse_json(val):
+        if not val:
+            return []
+        try:
+            return json.loads(val)
+        except:
+            return []
 
     results = []
     for row in records:
         mid = row['id']
 
-        # 查询匹配的代币
+        # 查询最佳代币 (is_best=1)
         cursor.execute('''
             SELECT token_symbol, token_name, token_address, chain,
-                   initial_market_cap, initial_holders, match_score, match_keyword
-            FROM matched_tokens WHERE match_id = ? ORDER BY rank
+                   initial_market_cap, final_score,
+                   mcap_1min, mcap_5min, mcap_10min, change_1min, change_5min, change_10min
+            FROM matched_tokens WHERE match_id = ? AND is_best = 1 ORDER BY final_score DESC
         ''', (mid,))
-        matched = [dict(r) for r in cursor.fetchall()]
-
-        # 查询最佳表现代币
-        cursor.execute('''
-            SELECT token_symbol, token_name, market_cap_change_pct, performance_score
-            FROM top_performers WHERE match_id = ? ORDER BY performance_rank
-        ''', (mid,))
-        top = [dict(r) for r in cursor.fetchall()]
-
-        # 解析 JSON 字段
-        def parse_json(val):
-            if not val:
-                return []
-            try:
-                return json.loads(val)
-            except:
-                return []
+        best_tokens = [dict(r) for r in cursor.fetchall()]
 
         results.append({
             'id': mid,
@@ -497,8 +548,7 @@ def query_best_tokens(limit=10):
             'refContent': row['ref_content'] or '',
             'refImages': parse_json(row['ref_images']),
             'keywords': parse_json(row['keywords']),
-            'matched_tokens': matched,
-            'best_tokens': top,
+            'best_tokens': best_tokens,
             'created_at': row['created_at']
         })
 
@@ -593,8 +643,11 @@ def recent():
     for row in cursor.fetchall():
         mid = row['id']
         cursor.execute('''
-            SELECT token_symbol, match_keyword, match_type, match_method, match_time_cost, source FROM matched_tokens
-            WHERE match_id = ? ORDER BY rank LIMIT 3
+            SELECT token_symbol, match_keyword, match_type, match_method, match_time_cost, source,
+                   initial_market_cap, mcap_1min, mcap_5min, mcap_10min,
+                   change_1min, change_5min, change_10min, final_score, is_best
+            FROM matched_tokens
+            WHERE match_id = ? ORDER BY rank
         ''', (mid,))
         tokens = [{
             'symbol': r['token_symbol'],
@@ -602,7 +655,16 @@ def recent():
             'match_type': r['match_type'] or '',
             'match_method': r['match_method'] or 'hardcoded',
             'match_time_cost': r['match_time_cost'] or 0,
-            'source': r['source'] or 'new'
+            'source': r['source'] or 'new',
+            'initial_mcap': r['initial_market_cap'] or 0,
+            'mcap_1min': r['mcap_1min'] or 0,
+            'mcap_5min': r['mcap_5min'] or 0,
+            'mcap_10min': r['mcap_10min'] or 0,
+            'change_1min': r['change_1min'] or 0,
+            'change_5min': r['change_5min'] or 0,
+            'change_10min': r['change_10min'] or 0,
+            'final_score': r['final_score'] or 0,
+            'is_best': r['is_best'] or 0
         } for r in cursor.fetchall()]
 
         records.append({
@@ -625,7 +687,11 @@ def recent():
             'execute_at': t['execute_at']
         } for t in tracking_tasks[:10]]
 
-    return jsonify({'tracking': tracking, 'records': records, 'pending': pending})
+    # 错误日志
+    with log_lock:
+        errors = list(recent_errors)[::-1]
+
+    return jsonify({'tracking': tracking, 'records': records, 'pending': pending, 'errors': errors})
 
 
 # ==================== 最佳实践 API ====================
@@ -715,7 +781,7 @@ def delete_best_practice(practice_id):
 
 @app.route('/delete_records', methods=['POST'])
 def delete_records():
-    """批量删除匹配记录"""
+    """移除最佳实践标记（is_best 设为 0）"""
     data = request.json
     ids = data.get('ids', [])
 
@@ -725,26 +791,21 @@ def delete_records():
     conn = sqlite3.connect(config.DB_PATH)
     cursor = conn.cursor()
 
-    deleted = 0
+    removed = 0
     for record_id in ids:
         try:
-            # 先删除关联的追踪数据
-            cursor.execute('SELECT id FROM matched_tokens WHERE match_id = ?', (record_id,))
-            token_ids = [row[0] for row in cursor.fetchall()]
-            for tid in token_ids:
-                cursor.execute('DELETE FROM market_cap_tracking WHERE matched_token_id = ?', (tid,))
-
+            # 把该记录下所有代币的 is_best 设为 0
+            cursor.execute('UPDATE matched_tokens SET is_best = 0 WHERE match_id = ?', (record_id,))
+            # 删除 top_performers 记录
             cursor.execute('DELETE FROM top_performers WHERE match_id = ?', (record_id,))
-            cursor.execute('DELETE FROM matched_tokens WHERE match_id = ?', (record_id,))
-            cursor.execute('DELETE FROM match_records WHERE id = ?', (record_id,))
-            deleted += 1
+            removed += 1
         except Exception as e:
-            print(f"[删除] 记录 {record_id} 失败: {e}", flush=True)
+            print(f"[移除最佳] 记录 {record_id} 失败: {e}", flush=True)
 
     conn.commit()
     conn.close()
 
-    return jsonify({'success': True, 'deleted': deleted})
+    return jsonify({'success': True, 'removed': removed})
 
 
 def insert_demo_data():
