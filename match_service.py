@@ -304,7 +304,7 @@ def match_exclusive_with_ai(tweet_text, start_time_ms=None, image_urls=None):
         best_keyword = None
         best_type = None
 
-        for token in tokens[:30]:
+        for token in tokens:
             symbol = (token.get('symbol') or '').lower()
             name = (token.get('name') or '').lower()
 
@@ -354,7 +354,7 @@ def match_exclusive_with_ai(tweet_text, start_time_ms=None, image_urls=None):
             print(f"[老币AI匹配] 跳过: 未配置 GEMINI_API_KEY", flush=True)
             return []
 
-        token_list_str = [f"{i+1}. symbol:{t['symbol']} name:{t['name']}" for i, t in enumerate(tokens[:30])]
+        token_list_str = [f"{i+1}. symbol:{t['symbol']} name:{t['name']}" for i, t in enumerate(tokens)]
         token_str = "\n".join(token_list_str)
 
         has_images = image_urls and len(image_urls) > 0
@@ -1155,7 +1155,7 @@ def match_tokens(news_time, tweet_text, image_urls=None):
             print(f"[新币AI匹配] 跳过: 未配置 GEMINI_API_KEY", flush=True)
             return []
 
-        token_list_str = [f"{i+1}. symbol:{t.get('tokenSymbol','')} name:{t.get('tokenName','')}" for i, t in enumerate(window_tokens[:30])]
+        token_list_str = [f"{i+1}. symbol:{t.get('tokenSymbol','')} name:{t.get('tokenName','')}" for i, t in enumerate(window_tokens)]
         token_str = "\n".join(token_list_str)
 
         has_images = image_urls and len(image_urls) > 0
@@ -1163,7 +1163,7 @@ def match_tokens(news_time, tweet_text, image_urls=None):
 
         prompt = f"""判断以下推文是否在提及代币列表中的某个代币。{image_hint}
 
-推文内容: {tweet_text[:500]}
+推文内容: {tweet_text}
 
 代币列表:
 {token_str}
@@ -1177,7 +1177,7 @@ def match_tokens(news_time, tweet_text, image_urls=None):
 
 只返回序号或 "none"，不要其他内容："""
 
-        print(f"[新币AI匹配] 开始匹配，窗口代币: {len(window_tokens[:30])} 个，图片: {len(image_urls) if image_urls else 0} 张", flush=True)
+        print(f"[新币AI匹配] 开始匹配，窗口代币: {len(window_tokens)} 个，图片: {len(image_urls) if image_urls else 0} 张", flush=True)
 
         try:
             from google import genai
@@ -1475,7 +1475,7 @@ def check_pending_news():
                                 image_hint = "（注意：推文包含图片，请结合图片内容判断）" if has_images else ""
 
                                 prompt = f"""判断推文是否提及这个代币。{image_hint}
-推文: {tweet_text[:300]}
+推文: {tweet_text}
 代币: symbol={token.get('tokenSymbol','')} name={token.get('tokenName','')}
 规则: 推文需要与代币有明确关联（包含、谐音、缩写、翻译等），也要分析图片内容
 只回答 yes 或 no:"""
