@@ -260,6 +260,7 @@ HTML_TEMPLATE = """
             最佳实践
             <div style="display:flex;gap:8px">
                 <button onclick="exportRecords()" style="background:#0ecb81;color:#fff;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;font-size:12px">📥 导出CSV</button>
+                <button onclick="exportAnalysis()" style="background:#1DA1F2;color:#fff;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;font-size:12px">📊 导出分析</button>
                 <button id="deleteBtn" onclick="toggleDeleteMode()" style="background:#363c45;color:#eaecef;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;font-size:12px">移除</button>
                 <button id="confirmDeleteBtn" onclick="confirmDelete()" style="display:none;background:#f6465d;color:#fff;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;font-size:12px">确认移除</button>
                 <button id="cancelDeleteBtn" onclick="cancelDeleteMode()" style="display:none;background:#363c45;color:#eaecef;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;font-size:12px">取消</button>
@@ -396,6 +397,55 @@ HTML_TEMPLATE = """
                 </div>
                 <div style="display:flex;gap:12px;justify-content:flex-end;margin-top:16px">
                     <button onclick="closeExclusiveBlacklistModal()" style="background:#363c45;color:#eaecef;border:none;padding:8px 16px;border-radius:4px;cursor:pointer">关闭</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 作者白名单弹窗 -->
+        <div id="authorWhitelistModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:1000;justify-content:center;align-items:center">
+            <div style="background:#1e2329;padding:24px;border-radius:8px;width:500px;max-width:90%">
+                <h3 style="margin:0 0 16px 0;color:#0ecb81">✅ 作者白名单</h3>
+                <p style="color:#848e9c;font-size:12px;margin-bottom:12px">启用后只接收白名单内作者的推文</p>
+                <div style="margin-bottom:12px;display:flex;gap:8px;align-items:center">
+                    <span style="color:#eaecef;font-size:13px">白名单过滤:</span>
+                    <button id="whitelistToggleBtn" onclick="toggleAuthorWhitelist()" style="background:#363c45;color:#eaecef;border:none;padding:6px 16px;border-radius:4px;cursor:pointer;font-size:12px">关闭</button>
+                </div>
+                <div style="margin-bottom:12px;display:flex;gap:8px">
+                    <input id="authorWhitelistInput" type="text" style="flex:1;background:#2b3139;border:1px solid #363c45;border-radius:4px;padding:8px;color:#eaecef" placeholder="输入作者 handle，如: elonmusk">
+                    <button onclick="addToAuthorWhitelist()" style="background:#0ecb81;color:#fff;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;white-space:nowrap">添加</button>
+                </div>
+                <div style="margin-bottom:12px">
+                    <textarea id="authorWhitelistBatch" style="width:100%;height:60px;background:#2b3139;border:1px solid #363c45;border-radius:4px;padding:8px;color:#eaecef;resize:vertical;font-size:12px" placeholder="批量添加（每行一个或逗号分隔）"></textarea>
+                    <button onclick="batchAddAuthorWhitelist()" style="background:#363c45;color:#eaecef;border:none;padding:6px 12px;border-radius:4px;cursor:pointer;font-size:11px;margin-top:4px">批量添加</button>
+                </div>
+                <div id="authorWhitelistList" style="max-height:250px;overflow-y:auto;background:#0b0e11;border-radius:4px;padding:8px">
+                    <div style="color:#848e9c;text-align:center;padding:20px">加载中...</div>
+                </div>
+                <div style="display:flex;gap:12px;justify-content:flex-end;margin-top:16px">
+                    <button onclick="openWhitelistNewsModal()" style="background:#F0B90B;color:#000;border:none;padding:8px 16px;border-radius:4px;cursor:pointer">📜 查看历史推文</button>
+                    <button onclick="closeAuthorWhitelistModal()" style="background:#363c45;color:#eaecef;border:none;padding:8px 16px;border-radius:4px;cursor:pointer">关闭</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 白名单历史推文弹窗 -->
+        <div id="whitelistNewsModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:1001;justify-content:center;align-items:center">
+            <div style="background:#1e2329;padding:24px;border-radius:8px;width:900px;max-width:95%;max-height:90vh;display:flex;flex-direction:column">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+                    <h3 style="margin:0;color:#F0B90B">📜 白名单作者历史推文</h3>
+                    <div style="display:flex;gap:8px;align-items:center">
+                        <select id="whitelistNewsAuthor" onchange="loadWhitelistNews()" style="background:#2b3139;border:1px solid #363c45;border-radius:4px;padding:6px 12px;color:#eaecef;font-size:12px">
+                            <option value="">全部作者</option>
+                        </select>
+                        <input id="whitelistNewsLimit" type="number" value="50" min="10" max="500" style="width:60px;background:#2b3139;border:1px solid #363c45;border-radius:4px;padding:6px;color:#eaecef;font-size:12px">
+                        <button onclick="loadWhitelistNews()" style="background:#0ecb81;color:#fff;border:none;padding:6px 12px;border-radius:4px;cursor:pointer;font-size:12px">刷新</button>
+                    </div>
+                </div>
+                <div id="whitelistNewsList" style="flex:1;overflow-y:auto;background:#0b0e11;border-radius:4px;padding:12px">
+                    <div style="color:#848e9c;text-align:center;padding:40px">点击刷新加载推文...</div>
+                </div>
+                <div style="display:flex;justify-content:flex-end;margin-top:16px">
+                    <button onclick="closeWhitelistNewsModal()" style="background:#363c45;color:#eaecef;border:none;padding:8px 16px;border-radius:4px;cursor:pointer">关闭</button>
                 </div>
             </div>
         </div>
@@ -610,6 +660,11 @@ HTML_TEMPLATE = """
             window.location.href = 'api/export_records';
         }
 
+        function exportAnalysis() {
+            // 下载分析导出 CSV
+            window.location.href = 'api/export_analysis';
+        }
+
         function toggleDeleteMode() {
             deleteMode = true;
             selectedIds.clear();
@@ -740,10 +795,18 @@ HTML_TEMPLATE = """
                 // 统计栏
                 let statsHtml = '';
                 if (s.name === 'news_service') {
+                    const whitelistEnabled = d.enable_whitelist;
+                    const whitelistBtnStyle = whitelistEnabled
+                        ? 'background:#0ecb81;color:#fff'
+                        : 'background:#363c45;color:#eaecef';
+                    const whitelistStatus = whitelistEnabled
+                        ? `<span style="color:#0ecb81">开启(${d.whitelist_count || 0}人)</span>`
+                        : '<span style="color:#848e9c">关闭</span>';
                     statsHtml = `<div class="stat-item">推文: <span class="stat-value">${d.total_news || 0}</span></div>
-                                <div class="stat-item">最后获取: <span class="stat-value" id="news_service-last-fetch">${formatTime(d.last_fetch)}</span></div>
-                                <div class="stat-item">最后成功: <span class="stat-value" id="news_service-last-success">${formatTime(d.last_success)}</span></div>
-                                <div class="stat-item">错误: <span class="stat-value ${hasErrors?'error':''}">${d.errors || 0}</span></div>`;
+                                <div class="stat-item">白名单: ${whitelistStatus}</div>
+                                <div class="stat-item">过滤: <span class="stat-value">${d.filtered_by_whitelist || 0}</span></div>
+                                <div class="stat-item">错误: <span class="stat-value ${hasErrors?'error':''}">${d.errors || 0}</span></div>
+                                <div class="stat-item"><button onclick="openAuthorWhitelistModal()" style="${whitelistBtnStyle};border:none;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:11px">管理白名单</button></div>`;
                 } else if (s.name === 'token_service') {
                     statsHtml = `<div class="stat-item">代币: <span class="stat-value">${d.total_tokens || 0}</span></div>
                                 <div class="stat-item">最后获取: <span class="stat-value" id="token_service-last-fetch">${formatTime(d.last_fetch)}</span></div>
@@ -1815,6 +1878,231 @@ HTML_TEMPLATE = """
             if (e.target === this) closeExclusiveBlacklistModal();
         });
 
+        // 作者白名单弹窗
+        let currentAuthorWhitelist = [];
+        let authorWhitelistEnabled = false;
+
+        function openAuthorWhitelistModal() {
+            document.getElementById('authorWhitelistModal').style.display = 'flex';
+            document.getElementById('authorWhitelistInput').value = '';
+            document.getElementById('authorWhitelistBatch').value = '';
+            loadAuthorWhitelist();
+        }
+
+        function closeAuthorWhitelistModal() {
+            document.getElementById('authorWhitelistModal').style.display = 'none';
+        }
+
+        async function loadAuthorWhitelist() {
+            try {
+                const resp = await fetch('api/author_whitelist');
+                const data = await resp.json();
+                currentAuthorWhitelist = data.authors || [];
+                authorWhitelistEnabled = data.enabled || false;
+                renderAuthorWhitelist();
+                updateWhitelistToggleBtn();
+            } catch (e) {
+                document.getElementById('authorWhitelistList').innerHTML =
+                    '<div style="color:#f6465d;text-align:center;padding:20px">加载失败: ' + e.message + '</div>';
+            }
+        }
+
+        function updateWhitelistToggleBtn() {
+            const btn = document.getElementById('whitelistToggleBtn');
+            if (authorWhitelistEnabled) {
+                btn.textContent = '开启中';
+                btn.style.background = '#0ecb81';
+                btn.style.color = '#fff';
+            } else {
+                btn.textContent = '已关闭';
+                btn.style.background = '#363c45';
+                btn.style.color = '#eaecef';
+            }
+        }
+
+        function renderAuthorWhitelist() {
+            const container = document.getElementById('authorWhitelistList');
+            if (currentAuthorWhitelist.length === 0) {
+                container.innerHTML = '<div style="color:#848e9c;text-align:center;padding:20px">暂无白名单作者</div>';
+                return;
+            }
+            container.innerHTML = currentAuthorWhitelist.map(author =>
+                `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px;border-bottom:1px solid #2b3139">
+                    <span style="color:#0ecb81">@${author}</span>
+                    <button onclick="removeFromAuthorWhitelist('${author}')" style="background:#f6465d;color:#fff;border:none;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:10px">删除</button>
+                </div>`
+            ).join('');
+        }
+
+        async function toggleAuthorWhitelist() {
+            try {
+                const resp = await fetch('api/author_whitelist/toggle', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({})
+                });
+                const data = await resp.json();
+                authorWhitelistEnabled = data.enabled;
+                updateWhitelistToggleBtn();
+            } catch (e) {
+                alert('切换失败: ' + e.message);
+            }
+        }
+
+        async function addToAuthorWhitelist() {
+            const input = document.getElementById('authorWhitelistInput');
+            const author = input.value.trim().replace(/^@/, '');
+            if (!author) {
+                alert('请输入作者 handle');
+                return;
+            }
+
+            try {
+                const resp = await fetch('api/author_whitelist/add', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ author: author })
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    input.value = '';
+                    loadAuthorWhitelist();
+                } else {
+                    alert('添加失败: ' + (data.error || '未知错误'));
+                }
+            } catch (e) {
+                alert('添加失败: ' + e.message);
+            }
+        }
+
+        async function batchAddAuthorWhitelist() {
+            const textarea = document.getElementById('authorWhitelistBatch');
+            const text = textarea.value.trim();
+            if (!text) {
+                alert('请输入作者列表');
+                return;
+            }
+
+            // 支持换行或逗号分隔
+            const authors = text.split(/[,\\n]/).map(a => a.trim().replace(/^@/, '')).filter(a => a);
+            if (authors.length === 0) {
+                alert('未识别到有效作者');
+                return;
+            }
+
+            try {
+                const resp = await fetch('api/author_whitelist/batch', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ authors: authors })
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    textarea.value = '';
+                    alert(`成功添加 ${data.count} 个作者`);
+                    loadAuthorWhitelist();
+                } else {
+                    alert('添加失败: ' + (data.error || '未知错误'));
+                }
+            } catch (e) {
+                alert('添加失败: ' + e.message);
+            }
+        }
+
+        async function removeFromAuthorWhitelist(author) {
+            try {
+                const resp = await fetch('api/author_whitelist/remove', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ author: author })
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    loadAuthorWhitelist();
+                } else {
+                    alert('删除失败: ' + (data.error || '未知错误'));
+                }
+            } catch (e) {
+                alert('删除失败: ' + e.message);
+            }
+        }
+
+        document.getElementById('authorWhitelistModal').addEventListener('click', function(e) {
+            if (e.target === this) closeAuthorWhitelistModal();
+        });
+
+        // 白名单历史推文弹窗
+        function openWhitelistNewsModal() {
+            document.getElementById('whitelistNewsModal').style.display = 'flex';
+            // 填充作者下拉框
+            const select = document.getElementById('whitelistNewsAuthor');
+            select.innerHTML = '<option value="">全部作者</option>';
+            currentAuthorWhitelist.forEach(author => {
+                select.innerHTML += `<option value="${author}">@${author}</option>`;
+            });
+            loadWhitelistNews();
+        }
+
+        function closeWhitelistNewsModal() {
+            document.getElementById('whitelistNewsModal').style.display = 'none';
+        }
+
+        async function loadWhitelistNews() {
+            const container = document.getElementById('whitelistNewsList');
+            const author = document.getElementById('whitelistNewsAuthor').value;
+            const limit = document.getElementById('whitelistNewsLimit').value || 50;
+
+            container.innerHTML = '<div style="color:#848e9c;text-align:center;padding:40px">加载中...</div>';
+
+            try {
+                const url = `api/whitelist_news?limit=${limit}` + (author ? `&author=${encodeURIComponent(author)}` : '');
+                const resp = await fetch(url);
+                const data = await resp.json();
+
+                if (!data.news || data.news.length === 0) {
+                    container.innerHTML = '<div style="color:#848e9c;text-align:center;padding:40px">暂无推文记录</div>';
+                    return;
+                }
+
+                let html = `<div style="color:#848e9c;font-size:11px;margin-bottom:12px">共 ${data.total} 条记录，显示最近 ${data.news.length} 条</div>`;
+
+                data.news.forEach(news => {
+                    const time = news.news_time ? new Date(news.news_time * 1000).toLocaleString() : '';
+                    const content = (news.news_content || '').substring(0, 300);
+                    const typeColors = {
+                        'newTweet': '#0ecb81',
+                        'reply': '#F0B90B',
+                        'retweet': '#1DA1F2',
+                        'quote': '#9B59B6'
+                    };
+                    const typeColor = typeColors[news.news_type] || '#848e9c';
+
+                    html += `
+                        <div style="background:#181a20;border-radius:6px;padding:12px;margin-bottom:8px;border-left:3px solid ${typeColor}">
+                            <div style="display:flex;justify-content:space-between;margin-bottom:8px">
+                                <div>
+                                    <span style="color:#F0B90B;font-weight:bold">@${news.news_author || ''}</span>
+                                    <span style="color:#848e9c;margin-left:8px;font-size:11px">${news.news_author_name || ''}</span>
+                                    <span style="color:${typeColor};margin-left:8px;font-size:10px;padding:2px 6px;background:${typeColor}22;border-radius:3px">${news.news_type || ''}</span>
+                                </div>
+                                <span style="color:#848e9c;font-size:11px">${time}</span>
+                            </div>
+                            <div style="color:#eaecef;font-size:13px;line-height:1.5;word-break:break-all">${content}${content.length >= 300 ? '...' : ''}</div>
+                            ${news.ref_content ? `<div style="margin-top:8px;padding:8px;background:#0b0e11;border-radius:4px;border-left:2px solid #363c45"><span style="color:#848e9c;font-size:11px">引用 @${news.ref_author || ''}:</span><div style="color:#b7bdc6;font-size:12px;margin-top:4px">${(news.ref_content || '').substring(0, 150)}...</div></div>` : ''}
+                        </div>
+                    `;
+                });
+
+                container.innerHTML = html;
+            } catch (e) {
+                container.innerHTML = `<div style="color:#f6465d;text-align:center;padding:40px">加载失败: ${e.message}</div>`;
+            }
+        }
+
+        document.getElementById('whitelistNewsModal').addEventListener('click', function(e) {
+            if (e.target === this) closeWhitelistNewsModal();
+        });
+
         // 提示词弹窗
         let promptData = null;
         let currentPromptTab = 'deepseek';
@@ -2088,6 +2376,26 @@ def api_export_records():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@app.route('/api/export_analysis', methods=['GET'])
+def api_export_analysis():
+    """导出分析推文和匹配代币"""
+    try:
+        resp = requests.get(
+            f'{config.get_service_url("tracker")}/export_analysis',
+            timeout=30,
+            proxies={'http': None, 'https': None}
+        )
+        if resp.status_code == 200:
+            return Response(
+                resp.content,
+                mimetype='text/csv',
+                headers=dict(resp.headers)
+            )
+        return jsonify({'success': False, 'error': resp.text}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/api/delete_records', methods=['POST'])
 def api_delete_records():
     """批量删除匹配记录"""
@@ -2248,6 +2556,154 @@ def api_prompt_template():
         return jsonify({'error': resp.text}), 400
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+# ==================== 作者白名单 API ====================
+
+@app.route('/api/author_whitelist', methods=['GET'])
+def api_get_author_whitelist():
+    """获取作者白名单"""
+    try:
+        resp = requests.get(
+            f'{config.get_service_url("news")}/whitelist',
+            timeout=5,
+            proxies={'http': None, 'https': None}
+        )
+        if resp.status_code == 200:
+            return jsonify(resp.json())
+        return jsonify({'enabled': False, 'authors': [], 'error': resp.text}), 400
+    except Exception as e:
+        return jsonify({'enabled': False, 'authors': [], 'error': str(e)}), 500
+
+
+@app.route('/api/author_whitelist/toggle', methods=['POST'])
+def api_toggle_author_whitelist():
+    """切换作者白名单开关"""
+    try:
+        resp = requests.post(
+            f'{config.get_service_url("news")}/whitelist/toggle',
+            json=request.json,
+            timeout=5,
+            proxies={'http': None, 'https': None}
+        )
+        if resp.status_code == 200:
+            return jsonify(resp.json())
+        return jsonify({'success': False, 'error': resp.text}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/author_whitelist/add', methods=['POST'])
+def api_add_author_whitelist():
+    """添加作者到白名单"""
+    try:
+        resp = requests.post(
+            f'{config.get_service_url("news")}/whitelist/add',
+            json=request.json,
+            timeout=5,
+            proxies={'http': None, 'https': None}
+        )
+        if resp.status_code == 200:
+            return jsonify(resp.json())
+        return jsonify({'success': False, 'error': resp.text}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/author_whitelist/remove', methods=['POST'])
+def api_remove_author_whitelist():
+    """从白名单移除作者"""
+    try:
+        resp = requests.post(
+            f'{config.get_service_url("news")}/whitelist/remove',
+            json=request.json,
+            timeout=5,
+            proxies={'http': None, 'https': None}
+        )
+        if resp.status_code == 200:
+            return jsonify(resp.json())
+        return jsonify({'success': False, 'error': resp.text}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/author_whitelist/batch', methods=['POST'])
+def api_batch_author_whitelist():
+    """批量添加作者到白名单"""
+    try:
+        resp = requests.post(
+            f'{config.get_service_url("news")}/whitelist/batch',
+            json=request.json,
+            timeout=5,
+            proxies={'http': None, 'https': None}
+        )
+        if resp.status_code == 200:
+            return jsonify(resp.json())
+        return jsonify({'success': False, 'error': resp.text}), 400
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/whitelist_news', methods=['GET'])
+def api_whitelist_news():
+    """查询白名单作者的历史推文"""
+    import sqlite3
+
+    limit = request.args.get('limit', 50, type=int)
+    author_filter = request.args.get('author', '').strip().lower()
+
+    try:
+        # 获取白名单
+        resp = requests.get(
+            f'{config.get_service_url("news")}/whitelist',
+            timeout=5,
+            proxies={'http': None, 'https': None}
+        )
+        if resp.status_code != 200:
+            return jsonify({'success': False, 'error': '无法获取白名单'}), 500
+
+        whitelist_data = resp.json()
+        authors = whitelist_data.get('authors', [])
+
+        if not authors:
+            return jsonify({'news': [], 'total': 0, 'message': '白名单为空'})
+
+        # 如果指定了作者过滤
+        if author_filter:
+            if author_filter not in [a.lower() for a in authors]:
+                return jsonify({'news': [], 'total': 0, 'message': '该作者不在白名单中'})
+            authors = [author_filter]
+
+        # 查询数据库
+        conn = sqlite3.connect(config.DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        # 构建 IN 子句
+        placeholders = ','.join(['?' for _ in authors])
+        query = f'''
+            SELECT news_time, news_author, news_author_name, news_avatar, news_type,
+                   news_content, news_images, ref_author, ref_content
+            FROM all_news
+            WHERE LOWER(news_author) IN ({placeholders})
+            ORDER BY news_time DESC
+            LIMIT ?
+        '''
+        cursor.execute(query, [a.lower() for a in authors] + [limit])
+        rows = cursor.fetchall()
+
+        # 获取总数
+        count_query = f'SELECT COUNT(*) FROM all_news WHERE LOWER(news_author) IN ({placeholders})'
+        cursor.execute(count_query, [a.lower() for a in authors])
+        total = cursor.fetchone()[0]
+
+        conn.close()
+
+        news_list = [dict(row) for row in rows]
+        return jsonify({'news': news_list, 'total': total})
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/start_service', methods=['POST'])

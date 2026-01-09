@@ -2,12 +2,14 @@
 推文发现服务 (端口 5050)
 - 监听 Binance 推文事件
 - 提供 SSE 流
+- 支持作者白名单过滤
 """
 import requests
 import time
 import json
 import threading
-from flask import Flask, Response, jsonify
+import os
+from flask import Flask, Response, jsonify, request
 import config
 
 app = Flask(__name__)
@@ -18,7 +20,8 @@ stats = {
     'running': True,
     'last_fetch': None,
     'last_success': None,
-    'errors': 0
+    'errors': 0,
+    'filtered_by_whitelist': 0
 }
 
 # 去重和新闻列表
@@ -30,6 +33,46 @@ news_lock = threading.Lock()
 error_log = []
 error_lock = threading.Lock()
 MAX_ERRORS = 20
+
+# ==================== 作者白名单 ====================
+WHITELIST_FILE = os.path.join(os.path.dirname(__file__), 'author_whitelist.json')
+author_whitelist = set()
+whitelist_lock = threading.Lock()
+enable_whitelist = False  # 是否启用白名单过滤
+
+
+def load_whitelist():
+    """加载白名单"""
+    global author_whitelist
+    try:
+        if os.path.exists(WHITELIST_FILE):
+            with open(WHITELIST_FILE, 'r') as f:
+                data = json.load(f)
+                author_whitelist = set(a.lower() for a in data)
+                print(f"[白名单] 加载 {len(author_whitelist)} 个作者", flush=True)
+    except Exception as e:
+        print(f"[白名单] 加载失败: {e}", flush=True)
+
+
+def save_whitelist():
+    """保存白名单"""
+    try:
+        with open(WHITELIST_FILE, 'w') as f:
+            json.dump(list(author_whitelist), f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[白名单] 保存失败: {e}", flush=True)
+
+
+def is_author_allowed(author):
+    """检查作者是否在白名单中（白名单关闭时允许所有）"""
+    if not enable_whitelist:
+        return True
+    with whitelist_lock:
+        return author.lower() in author_whitelist
+
+
+# 启动时加载白名单
+load_whitelist()
 
 
 def log_error(msg):
@@ -101,10 +144,17 @@ def news_fetcher():
         if new_items:
             with news_lock:
                 for item in new_items:
+                    user = item.get('user', {})
+                    author = user.get('handle', 'Unknown')
+
+                    # 白名单过滤
+                    if not is_author_allowed(author):
+                        stats['filtered_by_whitelist'] += 1
+                        continue
+
                     news_list.append(item)
                     stats['total_news'] += 1
-                    user = item.get('user', {})
-                    print(f"[推文] @{user.get('handle', 'Unknown')} - {item.get('eventType', '')}", flush=True)
+                    print(f"[推文] @{author} - {item.get('eventType', '')}", flush=True)
         time.sleep(1)
 
 
@@ -161,6 +211,8 @@ def stream():
 
 @app.route('/status')
 def status():
+    with whitelist_lock:
+        whitelist_count = len(author_whitelist)
     return jsonify({
         'service': 'news_service',
         'port': config.NEWS_PORT,
@@ -168,7 +220,10 @@ def status():
         'total_news': stats['total_news'],
         'last_fetch': stats['last_fetch'],
         'last_success': stats['last_success'],
-        'errors': stats['errors']
+        'errors': stats['errors'],
+        'enable_whitelist': enable_whitelist,
+        'whitelist_count': whitelist_count,
+        'filtered_by_whitelist': stats['filtered_by_whitelist']
     })
 
 
@@ -290,6 +345,94 @@ def inject():
 
     print(f"[注入] @{author} - {content[:50]}..." + (f" (含{len(file_urls)}张图)" if file_urls else ""), flush=True)
     return jsonify({'success': True, 'time': item['eventTime'], 'images': len(file_urls)})
+
+
+# ==================== 白名单 API ====================
+
+@app.route('/whitelist', methods=['GET'])
+def get_whitelist():
+    """获取白名单列表和状态"""
+    with whitelist_lock:
+        return jsonify({
+            'enabled': enable_whitelist,
+            'authors': sorted(list(author_whitelist)),
+            'count': len(author_whitelist)
+        })
+
+
+@app.route('/whitelist/toggle', methods=['POST'])
+def toggle_whitelist():
+    """切换白名单开关"""
+    global enable_whitelist
+    data = request.json or {}
+    if 'enabled' in data:
+        enable_whitelist = bool(data['enabled'])
+    else:
+        enable_whitelist = not enable_whitelist
+    status_str = "开启" if enable_whitelist else "关闭"
+    print(f"[白名单] {status_str}", flush=True)
+    return jsonify({'enabled': enable_whitelist})
+
+
+@app.route('/whitelist/add', methods=['POST'])
+def add_to_whitelist():
+    """添加作者到白名单"""
+    data = request.json or {}
+    author = data.get('author', '').strip()
+    if not author:
+        return jsonify({'success': False, 'error': '作者名不能为空'}), 400
+
+    with whitelist_lock:
+        author_lower = author.lower()
+        if author_lower in author_whitelist:
+            return jsonify({'success': False, 'error': '作者已在白名单中'}), 400
+        author_whitelist.add(author_lower)
+        save_whitelist()
+
+    print(f"[白名单] 添加: @{author}", flush=True)
+    return jsonify({'success': True, 'author': author})
+
+
+@app.route('/whitelist/remove', methods=['POST'])
+def remove_from_whitelist():
+    """从白名单移除作者"""
+    data = request.json or {}
+    author = data.get('author', '').strip()
+    if not author:
+        return jsonify({'success': False, 'error': '作者名不能为空'}), 400
+
+    with whitelist_lock:
+        author_lower = author.lower()
+        if author_lower not in author_whitelist:
+            return jsonify({'success': False, 'error': '作者不在白名单中'}), 400
+        author_whitelist.discard(author_lower)
+        save_whitelist()
+
+    print(f"[白名单] 移除: @{author}", flush=True)
+    return jsonify({'success': True, 'author': author})
+
+
+@app.route('/whitelist/batch', methods=['POST'])
+def batch_add_whitelist():
+    """批量添加作者到白名单"""
+    data = request.json or {}
+    authors = data.get('authors', [])
+    if not authors:
+        return jsonify({'success': False, 'error': '作者列表为空'}), 400
+
+    added = []
+    with whitelist_lock:
+        for author in authors:
+            author = author.strip()
+            if author:
+                author_lower = author.lower()
+                if author_lower not in author_whitelist:
+                    author_whitelist.add(author_lower)
+                    added.append(author)
+        save_whitelist()
+
+    print(f"[白名单] 批量添加: {len(added)} 个作者", flush=True)
+    return jsonify({'success': True, 'added': added, 'count': len(added)})
 
 
 @app.route('/health')

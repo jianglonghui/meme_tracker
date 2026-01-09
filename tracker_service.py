@@ -789,11 +789,12 @@ def export_records():
     conn = sqlite3.connect(config.DB_PATH)
     cursor = conn.cursor()
 
-    # 查询所有匹配记录和代币信息
+    # 查询所有匹配记录和代币信息（包含完整内容和引用内容）
     cursor.execute('''
         SELECT
             mr.id, mr.news_time, mr.news_author, mr.news_author_name,
-            mr.news_type, mr.news_content,
+            mr.news_type, mr.news_content, mr.ref_author, mr.ref_content,
+            mr.news_images, mr.ref_images,
             mt.token_symbol, mt.token_name, mt.token_address, mt.chain,
             mt.initial_market_cap, mt.match_method, mt.source,
             mt.mcap_1min, mt.mcap_5min, mt.mcap_10min,
@@ -812,7 +813,9 @@ def export_records():
 
     # 写入表头
     writer.writerow([
-        'record_id', 'news_time', 'author', 'author_name', 'type', 'content',
+        'record_id', 'news_time', 'author', 'author_name', 'type',
+        'content', 'ref_author', 'ref_content',
+        'images', 'ref_images',
         'symbol', 'name', 'address', 'chain',
         'initial_mcap', 'match_method', 'source',
         'mcap_1min', 'mcap_5min', 'mcap_10min',
@@ -823,17 +826,21 @@ def export_records():
     # 写入数据
     for row in rows:
         record_id, news_time, author, author_name, news_type, content, \
+        ref_author, ref_content, images, ref_images, \
         symbol, name, address, chain, initial_mcap, method, source, \
         mcap_1, mcap_5, mcap_10, chg_1, chg_5, chg_10, is_best, time_cost = row
 
         # 格式化时间
         time_str = datetime.fromtimestamp(news_time).strftime('%Y-%m-%d %H:%M:%S') if news_time else ''
 
-        # 格式化内容（去除换行）
-        content_clean = (content or '').replace('\n', ' ').replace('\r', '')[:200]
+        # 保留完整内容，只替换换行符为空格
+        content_clean = (content or '').replace('\n', ' ').replace('\r', '')
+        ref_content_clean = (ref_content or '').replace('\n', ' ').replace('\r', '')
 
         writer.writerow([
-            record_id, time_str, author, author_name, news_type, content_clean,
+            record_id, time_str, author, author_name, news_type,
+            content_clean, ref_author or '', ref_content_clean,
+            images or '', ref_images or '',
             symbol or '', name or '', address or '', chain or '',
             f"{initial_mcap:.0f}" if initial_mcap else '',
             method or '', source or '',
@@ -850,6 +857,77 @@ def export_records():
 
     # 生成文件名
     filename = f"match_records_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+
+    return Response(
+        output.getvalue(),
+        mimetype='text/csv',
+        headers={'Content-Disposition': f'attachment; filename={filename}'}
+    )
+
+
+@app.route('/export_analysis', methods=['GET'])
+def export_analysis():
+    """导出分析推文和匹配代币（简化版，相同推文合并）"""
+    import csv
+    import io
+    from datetime import datetime
+    from collections import OrderedDict
+
+    conn = sqlite3.connect(config.DB_PATH)
+    cursor = conn.cursor()
+
+    # 查询匹配记录，按推文ID分组
+    cursor.execute('''
+        SELECT
+            mr.id, mr.news_content, mr.ref_content,
+            mt.token_name, mt.token_symbol, mt.match_method
+        FROM match_records mr
+        LEFT JOIN matched_tokens mt ON mr.id = mt.match_id
+        WHERE mt.token_symbol IS NOT NULL
+        ORDER BY mr.news_time DESC
+    ''')
+    rows = cursor.fetchall()
+    conn.close()
+
+    # 按推文内容合并代币
+    tweets = OrderedDict()
+    for row in rows:
+        record_id, content, ref_content, token_name, token_symbol, match_method = row
+
+        # 构建推文文本
+        tweet_text = (content or '').replace('\n', ' ').replace('\r', '')
+        if ref_content:
+            ref_clean = (ref_content or '').replace('\n', ' ').replace('\r', '')
+            tweet_text = f"{tweet_text} [引用: {ref_clean}]" if tweet_text else f"[引用: {ref_clean}]"
+
+        # 匹配方法：中文化
+        method_cn = '硬编码' if match_method == 'hardcoded' else 'AI'
+
+        # 代币信息：symbol(name):方法
+        token_info = f"{token_symbol or ''}({token_name or ''}):{method_cn}"
+
+        # 按推文内容作为key合并
+        if tweet_text not in tweets:
+            tweets[tweet_text] = []
+        if token_info not in tweets[tweet_text]:  # 去重
+            tweets[tweet_text].append(token_info)
+
+    # 生成 CSV
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    # 写入表头
+    writer.writerow(['分析推文', '匹配代币列表'])
+
+    # 写入数据
+    for tweet_text, tokens in tweets.items():
+        tokens_str = '[' + '，'.join(tokens) + ']'
+        writer.writerow([tweet_text, tokens_str])
+
+    output.seek(0)
+
+    # 生成文件名
+    filename = f"analysis_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 
     return Response(
         output.getvalue(),

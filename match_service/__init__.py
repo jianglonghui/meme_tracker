@@ -250,18 +250,29 @@ def fetch_news_stream():
                         news_time = data.get('time', 0)
                         images = data.get('images', []) or []
 
+                        ref_content = data.get('refContent', '') or ''
+                        ref_images = data.get('refImages', []) or []
+
+                        # 生成完整内容用于存储和匹配
+                        full_content = content
+                        if event_type == 'follow':
+                            ref_author = data.get('refAuthor', '')
+                            full_content = f"关注了 @{ref_author}" + (f"\n\n{content}" if content else "")
+                        elif ref_content:
+                            full_content = f"{content}\n\n引用推文: {ref_content}" if content else ref_content
+
                         news_data = {
                             'time': news_time, 'author': author,
                             'authorName': data.get('authorName', ''),
                             'avatar': data.get('avatar', ''),
-                            'type': event_type, 'content': content,
+                            'type': event_type, 'content': full_content,
                             'images': images,
                             'videos': data.get('videos', []) or [],
                             'refAuthor': data.get('refAuthor', ''),
                             'refAuthorName': data.get('refAuthorName', ''),
                             'refAvatar': data.get('refAvatar', ''),
-                            'refContent': data.get('refContent', ''),
-                            'refImages': data.get('refImages', []) or [],
+                            'refContent': ref_content,
+                            'refImages': ref_images,
                         }
 
                         buffer_news(news_data)
@@ -269,18 +280,9 @@ def fetch_news_stream():
                         current_time_ms = int(time.time() * 1000)
                         news_age = current_time_ms - (news_time * 1000 if news_time < 10000000000 else news_time)
                         if news_age > MAX_NEWS_AGE:
-                            log_filtered(author, content, f"推文过期", news_time)
+                            log_filtered(author, full_content, f"推文过期", news_time)
                             continue
 
-                        ref_content = data.get('refContent', '') or ''
-                        full_content = content
-                        if event_type == 'follow':
-                            ref_author = data.get('refAuthor', '')
-                            full_content = f"关注了 @{ref_author}\n\n{content}" if content else f"关注了 @{ref_author}"
-                        elif ref_content:
-                            full_content = f"{content}\n\n引用推文: {ref_content}" if content else ref_content
-
-                        ref_images = data.get('refImages', []) or []
                         all_images = images + ref_images
 
                         executor.submit(process_news_item, news_data, full_content, all_images)
