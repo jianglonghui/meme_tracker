@@ -69,13 +69,17 @@ def log_filtered(author, content, reason, news_time):
             recent_filtered.pop(0)
 
 
-def log_attempt(author, content, keywords, tokens_in_window, matched_count, window_token_names):
+def log_attempt(author, content, keywords, tokens_in_window, matched_count, window_token_names,
+                event_type='', ref_author='', ref_author_name=''):
     """记录撮合尝试"""
     with log_lock:
         recent_attempts.append({
             'time': time.time(),
             'author': author,
             'content': content[:100],
+            'type': event_type,
+            'refAuthor': ref_author,
+            'refAuthorName': ref_author_name,
             'keywords': keywords[:5] if keywords else [],
             'tokens_in_window': tokens_in_window,
             'matched': matched_count,

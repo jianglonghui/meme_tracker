@@ -23,16 +23,20 @@ MIN_MATCH_SCORE = 2.0
 
 
 def refresh_exclusive_tokens():
-    """刷新优质代币缓存"""
+    """刷新优质代币缓存（包含优质代币 + Alpha代币）"""
     global exclusive_tokens_cache
+    headers = {
+        'accept': '*/*',
+        'content-type': 'application/json',
+        'clienttype': 'web',
+        'lang': 'en',
+        'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+    }
+    result = []
+    seen_addresses = set()
+
+    # 1. 获取优质代币
     try:
-        headers = {
-            'accept': '*/*',
-            'content-type': 'application/json',
-            'clienttype': 'web',
-            'lang': 'en',
-            'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
-        }
         resp = requests.get(
             'https://web3.binance.com/bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/pulse/exclusive/rank/list?chainId=56',
             headers=headers,
@@ -42,25 +46,69 @@ def refresh_exclusive_tokens():
         if resp.status_code == 200:
             data = resp.json()
             tokens = data.get('data', {}).get('tokens', []) or []
-            result = []
             for t in tokens:
-                meta = t.get('metaInfo', {}) or {}
-                result.append({
-                    'address': t.get('contractAddress', ''),
-                    'symbol': t.get('symbol', ''),
-                    'name': meta.get('name', '') or t.get('symbol', ''),
-                    'chain': 'BSC',
-                    'marketCap': float(t.get('marketCap', 0) or 0),
-                    'holders': int(t.get('holders', 0) or 0),
-                    'liquidity': float(t.get('liquidity', 0) or 0),
-                    'price': t.get('price', 0),
-                    'source': 'exclusive'
-                })
-            from . import state
-            state.exclusive_tokens_cache = result
-            print(f"[优质代币] 刷新缓存 {len(result)} 个", flush=True)
+                addr = t.get('contractAddress', '').lower()
+                if addr and addr not in seen_addresses:
+                    seen_addresses.add(addr)
+                    meta = t.get('metaInfo', {}) or {}
+                    result.append({
+                        'address': t.get('contractAddress', ''),
+                        'symbol': t.get('symbol', ''),
+                        'name': meta.get('name', '') or t.get('symbol', ''),
+                        'chain': 'BSC',
+                        'marketCap': float(t.get('marketCap', 0) or 0),
+                        'holders': int(t.get('holders', 0) or 0),
+                        'liquidity': float(t.get('liquidity', 0) or 0),
+                        'price': t.get('price', 0),
+                        'source': 'exclusive'
+                    })
+            print(f"[优质代币] 获取 {len(result)} 个", flush=True)
     except Exception as e:
-        print(f"[优质代币] 刷新失败: {e}", flush=True)
+        print(f"[优质代币] 获取失败: {e}", flush=True)
+
+    # 2. 获取 Alpha 代币
+    alpha_count = 0
+    try:
+        resp = requests.get(
+            'https://web3.binance.com/bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/pulse/exclusive/in/alpha/token/list',
+            headers=headers,
+            proxies=config.PROXIES,
+            timeout=10
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            # API 返回格式: data 可能是列表或字典
+            raw_data = data.get('data', [])
+            if isinstance(raw_data, list):
+                tokens = raw_data
+            elif isinstance(raw_data, dict):
+                tokens = raw_data.get('tokens', []) or []
+            else:
+                tokens = []
+            for t in tokens:
+                addr = t.get('contractAddress', '').lower()
+                if addr and addr not in seen_addresses:
+                    seen_addresses.add(addr)
+                    meta = t.get('metaInfo', {}) or {}
+                    result.append({
+                        'address': t.get('contractAddress', ''),
+                        'symbol': t.get('symbol', ''),
+                        'name': meta.get('name', '') or t.get('symbol', ''),
+                        'chain': 'BSC',
+                        'marketCap': float(t.get('marketCap', 0) or 0),
+                        'holders': int(t.get('holders', 0) or 0),
+                        'liquidity': float(t.get('liquidity', 0) or 0),
+                        'price': t.get('price', 0),
+                        'source': 'alpha'
+                    })
+                    alpha_count += 1
+            print(f"[Alpha代币] 获取 {alpha_count} 个", flush=True)
+    except Exception as e:
+        print(f"[Alpha代币] 获取失败: {e}", flush=True)
+
+    from . import state
+    state.exclusive_tokens_cache = result
+    print(f"[优质+Alpha] 缓存总计 {len(result)} 个代币", flush=True)
 
 
 def get_exclusive_tokens():

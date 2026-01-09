@@ -35,12 +35,52 @@ from .ai_clients import extract_keywords
 from .utils import load_seen_events, save_seen_events, get_cached_image
 from .orchestrator import MatchOrchestrator
 
+def send_to_trade_service(news_data, matched_tokens):
+    """发送信号到交易服务"""
+    try:
+        tokens_data = []
+        for t in matched_tokens[:3]:
+            tokens_data.append({
+                'token_address': t.get('tokenAddress', ''),
+                'token_symbol': t.get('tokenSymbol', ''),
+                'token_name': t.get('tokenName', ''),
+                'chain': t.get('chain', 'BSC'),
+                'market_cap': t.get('marketCap', 0),
+                'price': t.get('price', '0'),
+            })
+
+        payload = {
+            'author': news_data.get('author', ''),
+            'author_name': news_data.get('authorName', ''),
+            'content': news_data.get('content', ''),
+            'tokens': tokens_data,
+        }
+
+        resp = requests.post(
+            f"{config.get_service_url('trade')}/signal",
+            json=payload,
+            timeout=5,
+            proxies={'http': None, 'https': None}
+        )
+        if resp.status_code == 200:
+            result = resp.json()
+            results = result.get('results', [])
+            for r in results:
+                if r.get('action') == 'buy':
+                    print(f"[Trade] 买入信号: {r.get('symbol')} - {r.get('trigger')}", flush=True)
+    except Exception as e:
+        # 交易服务可能未启动，静默失败
+        pass
+
+
 def on_match_found(news_data, keywords, matched_tokens):
     """Orchestrator 结果回调"""
     stats['total_matches'] += 1
     stats['last_match'] = time.time()
     log_match(news_data.get('author', ''), news_data.get('content', ''), matched_tokens)
     send_to_tracker(news_data, keywords, matched_tokens)
+    # 发送到交易服务
+    send_to_trade_service(news_data, matched_tokens)
 
 # 初始化全局调度器
 orchestrator = MatchOrchestrator(send_callback=on_match_found)
@@ -157,8 +197,13 @@ def process_news_item(news_data, full_content, all_images):
         log_filtered(author, content, "推文内容为空", news_time)
         return
 
+    # 提取 follow 类型事件的额外字段
+    event_type = news_data.get('type', '')
+    ref_author = news_data.get('refAuthor', '')
+    ref_author_name = news_data.get('refAuthorName', '')
+
     print(f"[推文] @{author}: {tweet_text[:100]}...", flush=True)
-    log_attempt(author, content, [], 0, 0, [])
+    log_attempt(author, content, [], 0, 0, [], event_type, ref_author, ref_author_name)
 
     try:
         # 1. 处理老币 (专属列表) - 特殊逻辑，依然保留独立横扫
@@ -257,7 +302,10 @@ def fetch_news_stream():
                         full_content = content
                         if event_type == 'follow':
                             ref_author = data.get('refAuthor', '')
-                            full_content = f"关注了 @{ref_author}" + (f"\n\n{content}" if content else "")
+                            ref_author_name = data.get('refAuthorName', '')
+                            # 包含被关注用户的昵称，便于AI匹配
+                            name_part = f" ({ref_author_name})" if ref_author_name else ""
+                            full_content = f"关注了 @{ref_author}{name_part}" + (f"\n\n{content}" if content else "")
                         elif ref_content:
                             full_content = f"{content}\n\n引用推文: {ref_content}" if content else ref_content
 
