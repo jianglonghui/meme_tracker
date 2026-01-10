@@ -2533,7 +2533,7 @@ HTML_TEMPLATE = """
 
         async function loadTradeConfig() {
             try {
-                const resp = await fetch('/api/trade/config');
+                const resp = await fetch('api/trade/config');
                 tradeConfig = await resp.json();
                 document.getElementById('tradeBuyAmount').value = tradeConfig.default_buy_amount || 0.5;
                 document.getElementById('tradeSellMultiple').value = tradeConfig.sell_trigger_multiple || 2.0;
@@ -2565,7 +2565,7 @@ HTML_TEMPLATE = """
         async function toggleTradeEnabled() {
             const newEnabled = !tradeConfig.enabled;
             try {
-                const resp = await fetch('/api/trade/config', {
+                const resp = await fetch('api/trade/config', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({ enabled: newEnabled })
@@ -2589,7 +2589,7 @@ HTML_TEMPLATE = """
                 no_change_timeout: parseInt(document.getElementById('tradeNoChangeTimeout').value) ?? 20
             };
             try {
-                const resp = await fetch('/api/trade/config', {
+                const resp = await fetch('api/trade/config', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify(config)
@@ -2606,7 +2606,7 @@ HTML_TEMPLATE = """
 
         async function loadTradePositions() {
             try {
-                const resp = await fetch('/api/trade/positions');
+                const resp = await fetch('api/trade/positions');
                 const data = await resp.json();
                 const positions = data.positions || [];
                 const container = document.getElementById('tradePositionsList');
@@ -2672,7 +2672,7 @@ HTML_TEMPLATE = """
         async function closePosition(positionId) {
             if (!confirm('确定要平仓吗?')) return;
             try {
-                const resp = await fetch('/api/trade/positions/' + positionId, { method: 'DELETE' });
+                const resp = await fetch('api/trade/positions/' + positionId, { method: 'DELETE' });
                 if (resp.ok) {
                     loadTradePositions();
                 } else {
@@ -2685,7 +2685,7 @@ HTML_TEMPLATE = """
 
         async function loadTradeHistory() {
             try {
-                const resp = await fetch('/api/trade/history?limit=30');
+                const resp = await fetch('api/trade/history?limit=30');
                 const data = await resp.json();
                 const history = data.history || [];
                 const container = document.getElementById('tradeHistoryList');
@@ -2733,7 +2733,7 @@ HTML_TEMPLATE = """
 
         async function loadTradeAuthors() {
             try {
-                const resp = await fetch('/api/trade/whitelist/authors');
+                const resp = await fetch('api/trade/whitelist/authors');
                 const data = await resp.json();
                 const authors = data.authors || [];
                 const container = document.getElementById('tradeAuthorsList');
@@ -2758,7 +2758,7 @@ HTML_TEMPLATE = """
             const author = document.getElementById('tradeNewAuthor').value.trim();
             if (!author) return;
             try {
-                const resp = await fetch('/api/trade/whitelist/authors', {
+                const resp = await fetch('api/trade/whitelist/authors', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({ author })
@@ -2774,7 +2774,7 @@ HTML_TEMPLATE = """
 
         async function removeTradeAuthor(author) {
             try {
-                const resp = await fetch('/api/trade/whitelist/authors', {
+                const resp = await fetch('api/trade/whitelist/authors', {
                     method: 'DELETE',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({ author })
@@ -2789,7 +2789,7 @@ HTML_TEMPLATE = """
 
         async function loadTradeTokens() {
             try {
-                const resp = await fetch('/api/trade/whitelist/tokens');
+                const resp = await fetch('api/trade/whitelist/tokens');
                 const data = await resp.json();
                 const tokens = data.tokens || [];
                 const container = document.getElementById('tradeTokensList');
@@ -2823,7 +2823,7 @@ HTML_TEMPLATE = """
             const symbol = document.getElementById('tradeNewTokenSymbol').value.trim();
             if (!address) return;
             try {
-                const resp = await fetch('/api/trade/whitelist/tokens', {
+                const resp = await fetch('api/trade/whitelist/tokens', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({ address, symbol })
@@ -2840,7 +2840,7 @@ HTML_TEMPLATE = """
 
         async function removeTradeToken(address) {
             try {
-                const resp = await fetch('/api/trade/whitelist/tokens', {
+                const resp = await fetch('api/trade/whitelist/tokens', {
                     method: 'DELETE',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({ address })
