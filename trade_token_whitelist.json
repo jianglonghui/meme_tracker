@@ -5,11 +5,6 @@
     "note": ""
   },
   {
-    "address": "0xf8fd04c57ab0cc840a7f2edcb8c3b2fd90d64444",
-    "symbol": "",
-    "note": ""
-  },
-  {
     "address": "0x1a3b376453fc97dee6799b0e998a1a0e24364444",
     "symbol": "",
     "note": ""
@@ -75,8 +70,13 @@
     "note": "优质代币"
   },
   {
-    "address": "0x18d0e455b3491e09210292d3953157a4bf104444",
-    "symbol": "比特币",
+    "address": "0xf9c6e80e9a5807a1214a79449009b48104f94444",
+    "symbol": "黑马",
+    "note": "优质代币"
+  },
+  {
+    "address": "0xf8fd04c57ab0cc840a7f2edcb8c3b2fd90d64444",
+    "symbol": "妈妈",
     "note": "优质代币"
   }
 ]

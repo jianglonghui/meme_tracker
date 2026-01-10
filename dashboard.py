@@ -637,19 +637,107 @@ HTML_TEMPLATE = """
         }
 
         let tokenChainFilter = 'ALL';
-        let showExclusive = false;  // 是否显示优质代币
-        let showAlpha = false;      // 是否显示Alpha代币
-        let exclusiveTokens = [];   // 优质代币缓存
-        let alphaTokens = [];       // Alpha代币缓存
-        let exclusiveBlacklistSet = new Set();  // 优质代币黑名单集合（用于快速查找）
-        let tradeWhitelistSet = new Set();  // 交易白名单集合（用于快速查找）
-        let lastServiceData = {};  // 每个服务的上次数据
-        let deleteMode = false;  // 删除模式
-        let selectedIds = new Set();  // 选中的记录ID
-        let exclusiveBlacklistMode = false;  // 优质代币加黑模式
-        let selectedBlacklistAddrs = new Set();  // 选中要加黑的合约地址
-        let tradeWhitelistMode = false;  // 交易白名单模式
-        let selectedTradeWhitelistAddrs = new Set();  // 选中要加入交易白名单的合约地址
+        // ==================== 状态机 ====================
+        // 视图模式（互斥）
+        const ViewMode = { NORMAL: 'normal', EXCLUSIVE: 'exclusive', ALPHA: 'alpha' };
+        // 编辑模式（互斥）
+        const EditMode = { NONE: 'none', BLACKLIST: 'blacklist', WHITELIST: 'whitelist' };
+
+        // 统一状态对象
+        const tokenState = {
+            viewMode: ViewMode.NORMAL,
+            editMode: EditMode.NONE,
+            // 数据缓存
+            exclusiveTokens: [],
+            alphaTokens: [],
+            blacklistSet: new Set(),      // 黑名单集合
+            whitelistSet: new Set(),      // 交易白名单集合
+            // 选择状态（添加/移除共用，根据原状态判断）
+            selected: new Set(),
+        };
+
+        // 兼容旧变量（渐进重构，避免大面积改动）
+        let exclusiveTokens = tokenState.exclusiveTokens;
+        let alphaTokens = tokenState.alphaTokens;
+        let exclusiveBlacklistSet = tokenState.blacklistSet;
+        let tradeWhitelistSet = tokenState.whitelistSet;
+        let lastServiceData = {};
+        let deleteMode = false;
+        let selectedIds = new Set();
+
+        // 旧变量映射到新状态（getter）
+        Object.defineProperty(window, 'showExclusive', { get: () => tokenState.viewMode === ViewMode.EXCLUSIVE });
+        Object.defineProperty(window, 'showAlpha', { get: () => tokenState.viewMode === ViewMode.ALPHA });
+        Object.defineProperty(window, 'exclusiveBlacklistMode', { get: () => tokenState.editMode === EditMode.BLACKLIST });
+        Object.defineProperty(window, 'tradeWhitelistMode', { get: () => tokenState.editMode === EditMode.WHITELIST });
+
+        // 状态切换函数
+        function setViewMode(mode) {
+            tokenState.viewMode = mode;
+            setEditMode(EditMode.NONE);  // 切换视图时退出编辑模式
+            lastServiceData['token_service'] = '';
+        }
+
+        function setEditMode(mode) {
+            tokenState.editMode = mode;
+            tokenState.selected.clear();  // 切换编辑模式时清空选择
+            lastServiceData['token_service'] = '';
+        }
+
+        // 选择操作（统一处理添加/移除）
+        function toggleSelection(addr, isInList) {
+            const key = addr + (isInList ? ':remove' : ':add');
+            if (tokenState.selected.has(key)) {
+                tokenState.selected.delete(key);
+            } else {
+                tokenState.selected.add(key);
+            }
+            updateEditBtnText();
+        }
+
+        function getSelectionCounts() {
+            let toAdd = 0, toRemove = 0;
+            tokenState.selected.forEach(k => {
+                if (k.endsWith(':add')) toAdd++;
+                else if (k.endsWith(':remove')) toRemove++;
+            });
+            return { toAdd, toRemove };
+        }
+
+        function updateEditBtnText() {
+            const { toAdd, toRemove } = getSelectionCounts();
+            const btnId = tokenState.editMode === EditMode.BLACKLIST ? 'confirmBlacklistBtn' : 'confirmTradeWhitelistBtn';
+            const btn = document.getElementById(btnId);
+            if (!btn) return;
+
+            const actionAdd = tokenState.editMode === EditMode.BLACKLIST ? '加黑' : '加入';
+            const actionRemove = '移除';
+
+            if (toAdd > 0 && toRemove > 0) {
+                btn.textContent = `确认 (+${toAdd} -${toRemove})`;
+            } else if (toAdd > 0) {
+                btn.textContent = `确认${actionAdd} (${toAdd})`;
+            } else if (toRemove > 0) {
+                btn.textContent = `确认${actionRemove} (${toRemove})`;
+            } else {
+                btn.textContent = '确认';
+            }
+        }
+
+        function isSelected(addr, isInList) {
+            const key = addr + (isInList ? ':remove' : ':add');
+            return tokenState.selected.has(key);
+        }
+
+        function shouldBeChecked(addr, isInList) {
+            // 已在列表中：默认勾选，如果选中移除则不勾选
+            // 不在列表中：默认不勾选，如果选中添加则勾选
+            if (isInList) {
+                return !isSelected(addr, true);
+            } else {
+                return isSelected(addr, false);
+            }
+        }
 
         function setTokenChainFilter(chain) {
             tokenChainFilter = chain;
@@ -658,32 +746,31 @@ HTML_TEMPLATE = """
         }
 
         async function toggleExclusiveMode() {
-            showExclusive = !showExclusive;
-            showAlpha = false;  // 切换时关闭Alpha模式
-            tradeWhitelistMode = false;
-            selectedTradeWhitelistAddrs.clear();
-            if (showExclusive && exclusiveTokens.length === 0) {
-                await loadExclusiveTokens();
+            if (tokenState.viewMode === ViewMode.EXCLUSIVE) {
+                setViewMode(ViewMode.NORMAL);
+            } else {
+                setViewMode(ViewMode.EXCLUSIVE);
+                if (tokenState.exclusiveTokens.length === 0) {
+                    await loadExclusiveTokens();
+                }
             }
-            lastServiceData['token_service'] = '';  // 强制刷新
             refresh();
         }
 
         async function toggleAlphaMode() {
-            showAlpha = !showAlpha;
-            showExclusive = false;  // 切换时关闭优质模式
-            tradeWhitelistMode = false;
-            selectedTradeWhitelistAddrs.clear();
-            if (showAlpha && alphaTokens.length === 0) {
-                await loadAlphaTokens();
+            if (tokenState.viewMode === ViewMode.ALPHA) {
+                setViewMode(ViewMode.NORMAL);
+            } else {
+                setViewMode(ViewMode.ALPHA);
+                if (tokenState.alphaTokens.length === 0) {
+                    await loadAlphaTokens();
+                }
             }
-            lastServiceData['token_service'] = '';  // 强制刷新
             refresh();
         }
 
         async function loadExclusiveTokens() {
             try {
-                // 并行加载优质代币、黑名单和交易白名单
                 const [tokenResp, blacklistResp, tradeWhitelistResp] = await Promise.all([
                     fetch('api/exclusive'),
                     fetch('api/exclusive_blacklist'),
@@ -692,161 +779,103 @@ HTML_TEMPLATE = """
                 const tokenData = await tokenResp.json();
                 const blacklistData = await blacklistResp.json();
                 const tradeWlData = await tradeWhitelistResp.json();
-                exclusiveTokens = tokenData.items || [];
-                exclusiveBlacklistSet = new Set((blacklistData.blacklist || []).map(a => a.toLowerCase()));
-                tradeWhitelistSet = new Set((tradeWlData.tokens || []).map(t => (t.address || t).toLowerCase()));
+
+                tokenState.exclusiveTokens = tokenData.items || [];
+                tokenState.blacklistSet = new Set((blacklistData.blacklist || []).map(a => a.toLowerCase()));
+                tokenState.whitelistSet = new Set((tradeWlData.tokens || []).map(t => (t.address || t).toLowerCase()));
+                // 兼容旧引用
+                exclusiveTokens = tokenState.exclusiveTokens;
+                exclusiveBlacklistSet = tokenState.blacklistSet;
+                tradeWhitelistSet = tokenState.whitelistSet;
             } catch (e) {
                 console.error('加载优质代币失败:', e);
+                tokenState.exclusiveTokens = [];
                 exclusiveTokens = [];
-                exclusiveBlacklistSet = new Set();
             }
         }
 
         async function loadAlphaTokens() {
             try {
-                // 并行加载Alpha代币和交易白名单
                 const [tokenResp, tradeWhitelistResp] = await Promise.all([
                     fetch('api/alpha'),
                     fetch('api/trade/whitelist/tokens')
                 ]);
                 const tokenData = await tokenResp.json();
                 const tradeWlData = await tradeWhitelistResp.json();
-                alphaTokens = tokenData.items || [];
-                tradeWhitelistSet = new Set((tradeWlData.tokens || []).map(t => (t.address || t).toLowerCase()));
+
+                tokenState.alphaTokens = tokenData.items || [];
+                tokenState.whitelistSet = new Set((tradeWlData.tokens || []).map(t => (t.address || t).toLowerCase()));
+                // 兼容旧引用
+                alphaTokens = tokenState.alphaTokens;
+                tradeWhitelistSet = tokenState.whitelistSet;
             } catch (e) {
                 console.error('加载Alpha代币失败:', e);
+                tokenState.alphaTokens = [];
                 alphaTokens = [];
             }
         }
 
+        // ==================== 编辑模式切换 ====================
         function toggleTradeWhitelistMode() {
-            tradeWhitelistMode = !tradeWhitelistMode;
-            selectedTradeWhitelistAddrs.clear();
-            lastServiceData['token_service'] = '';  // 强制刷新
-            refresh();
-        }
-
-        function toggleSelectTradeWhitelistAddr(addr) {
-            if (selectedTradeWhitelistAddrs.has(addr)) {
-                selectedTradeWhitelistAddrs.delete(addr);
+            if (tokenState.editMode === EditMode.WHITELIST) {
+                setEditMode(EditMode.NONE);
             } else {
-                selectedTradeWhitelistAddrs.add(addr);
+                setEditMode(EditMode.WHITELIST);
             }
-            // 更新复选框状态
-            const checkbox = document.getElementById('tw-check-' + addr.slice(0,8));
-            if (checkbox) checkbox.checked = selectedTradeWhitelistAddrs.has(addr);
-            updateTradeWhitelistBtnText();
-        }
-
-        function updateTradeWhitelistBtnText() {
-            const btn = document.getElementById('confirmTradeWhitelistBtn');
-            if (btn) {
-                btn.textContent = selectedTradeWhitelistAddrs.size > 0 ? `确认加入 (${selectedTradeWhitelistAddrs.size})` : '确认加入';
-            }
-        }
-
-        async function confirmAddToTradeWhitelist() {
-            if (selectedTradeWhitelistAddrs.size === 0) {
-                alert('请选择要加入交易白名单的代币');
-                return;
-            }
-            try {
-                // 获取代币信息用于添加
-                const currentTokens = showAlpha ? alphaTokens : exclusiveTokens;
-                // 批量添加到交易白名单
-                for (const addr of selectedTradeWhitelistAddrs) {
-                    const token = currentTokens.find(t => t.address === addr);
-                    await fetch('api/trade/whitelist/tokens', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({
-                            address: addr,
-                            symbol: token ? token.symbol : '',
-                            note: showAlpha ? 'Alpha代币' : '优质代币'
-                        })
-                    });
-                }
-                // 刷新交易白名单
-                const tradeWhitelistResp = await fetch('api/trade/whitelist/tokens');
-                const tradeWlData = await tradeWhitelistResp.json();
-                tradeWhitelistSet = new Set((tradeWlData.tokens || []).map(t => (t.address || t).toLowerCase()));
-                // 退出加入模式
-                tradeWhitelistMode = false;
-                selectedTradeWhitelistAddrs.clear();
-                lastServiceData['token_service'] = '';
-                refresh();
-                alert('添加成功');
-            } catch (e) {
-                alert('添加失败: ' + e.message);
-            }
-        }
-
-        function cancelTradeWhitelistMode() {
-            tradeWhitelistMode = false;
-            selectedTradeWhitelistAddrs.clear();
-            lastServiceData['token_service'] = '';
             refresh();
         }
 
         function toggleExclusiveBlacklistMode() {
-            exclusiveBlacklistMode = !exclusiveBlacklistMode;
-            selectedBlacklistAddrs.clear();
-            lastServiceData['token_service'] = '';  // 强制刷新
+            if (tokenState.editMode === EditMode.BLACKLIST) {
+                setEditMode(EditMode.NONE);
+            } else {
+                setEditMode(EditMode.BLACKLIST);
+            }
             refresh();
         }
 
-        function toggleSelectBlacklistAddr(addr) {
-            if (selectedBlacklistAddrs.has(addr)) {
-                selectedBlacklistAddrs.delete(addr);
-            } else {
-                selectedBlacklistAddrs.add(addr);
-            }
-            // 更新复选框状态
-            const checkbox = document.getElementById('bl-check-' + addr.slice(0,8));
-            if (checkbox) checkbox.checked = selectedBlacklistAddrs.has(addr);
-            updateBlacklistBtnText();
-        }
-
-        function updateBlacklistBtnText() {
-            const btn = document.getElementById('confirmBlacklistBtn');
-            if (btn) {
-                btn.textContent = selectedBlacklistAddrs.size > 0 ? `确认加黑 (${selectedBlacklistAddrs.size})` : '确认加黑';
-            }
-        }
-
-        async function confirmAddToBlacklist() {
-            if (selectedBlacklistAddrs.size === 0) {
-                alert('请选择要加黑的代币');
-                return;
-            }
-            try {
-                // 批量添加到黑名单
-                for (const addr of selectedBlacklistAddrs) {
-                    await fetch('api/exclusive_blacklist', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify({ address: addr })
-                    });
-                }
-                // 刷新黑名单
-                const blacklistResp = await fetch('api/exclusive_blacklist');
-                const blacklistData = await blacklistResp.json();
-                exclusiveBlacklistSet = new Set((blacklistData.blacklist || []).map(a => a.toLowerCase()));
-                // 退出加黑模式
-                exclusiveBlacklistMode = false;
-                selectedBlacklistAddrs.clear();
-                lastServiceData['token_service'] = '';
-                refresh();
-            } catch (e) {
-                alert('加黑失败: ' + e.message);
-            }
+        function cancelTradeWhitelistMode() {
+            setEditMode(EditMode.NONE);
+            refresh();
         }
 
         function cancelExclusiveBlacklistMode() {
-            exclusiveBlacklistMode = false;
-            selectedBlacklistAddrs.clear();
-            lastServiceData['token_service'] = '';
+            setEditMode(EditMode.NONE);
             refresh();
+        }
+
+        // ==================== 选择操作（统一） ====================
+        function toggleSelectTradeWhitelistAddr(addr, isInList) {
+            toggleSelection(addr, isInList);
+            // 更新复选框状态
+            const checkbox = document.getElementById('tw-check-' + addr.slice(0,8));
+            if (checkbox) checkbox.checked = shouldBeChecked(addr, isInList);
+        }
+
+        function toggleSelectBlacklistAddr(addr, isInList) {
+            toggleSelection(addr, isInList);
+            // 更新复选框状态
+            const checkbox = document.getElementById('bl-check-' + addr.slice(0,8));
+            if (checkbox) checkbox.checked = shouldBeChecked(addr, isInList);
+        }
+
+        // ==================== 快速移除（非编辑模式下点击图标） ====================
+        async function removeFromTradeWhitelistQuick(addr) {
+            try {
+                const resp = await fetch('api/trade/whitelist/tokens', {
+                    method: 'DELETE',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ address: addr })
+                });
+                if (resp.ok) {
+                    tokenState.whitelistSet.delete(addr.toLowerCase());
+                    tradeWhitelistSet = tokenState.whitelistSet;
+                    lastServiceData['token_service'] = '';
+                    refresh();
+                }
+            } catch (e) {
+                alert('移除失败: ' + e.message);
+            }
         }
 
         async function removeFromBlacklistQuick(addr) {
@@ -856,14 +885,110 @@ HTML_TEMPLATE = """
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({ address: addr })
                 });
-                const data = await resp.json();
-                if (data.success) {
-                    exclusiveBlacklistSet = new Set((data.blacklist || []).map(a => a.toLowerCase()));
+                if (resp.ok) {
+                    tokenState.blacklistSet.delete(addr.toLowerCase());
+                    exclusiveBlacklistSet = tokenState.blacklistSet;
                     lastServiceData['token_service'] = '';
                     refresh();
                 }
             } catch (e) {
-                alert('解除失败: ' + e.message);
+                alert('移除失败: ' + e.message);
+            }
+        }
+
+        // ==================== 批量确认操作 ====================
+        async function confirmAddToTradeWhitelist() {
+            const { toAdd, toRemove } = getSelectionCounts();
+            if (toAdd === 0 && toRemove === 0) {
+                alert('请选择要操作的代币');
+                return;
+            }
+            try {
+                const currentTokens = tokenState.viewMode === ViewMode.ALPHA ? tokenState.alphaTokens : tokenState.exclusiveTokens;
+
+                // 批量添加
+                for (const key of tokenState.selected) {
+                    if (key.endsWith(':add')) {
+                        const addr = key.slice(0, -4);
+                        const token = currentTokens.find(t => t.address === addr);
+                        await fetch('api/trade/whitelist/tokens', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({
+                                address: addr,
+                                symbol: token ? token.symbol : '',
+                                note: tokenState.viewMode === ViewMode.ALPHA ? 'Alpha代币' : '优质代币'
+                            })
+                        });
+                    }
+                }
+                // 批量移除
+                for (const key of tokenState.selected) {
+                    if (key.endsWith(':remove')) {
+                        const addr = key.slice(0, -7);
+                        await fetch('api/trade/whitelist/tokens', {
+                            method: 'DELETE',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({ address: addr })
+                        });
+                    }
+                }
+
+                // 刷新白名单数据
+                const resp = await fetch('api/trade/whitelist/tokens');
+                const data = await resp.json();
+                tokenState.whitelistSet = new Set((data.tokens || []).map(t => (t.address || t).toLowerCase()));
+                tradeWhitelistSet = tokenState.whitelistSet;
+
+                setEditMode(EditMode.NONE);
+                refresh();
+                alert('操作成功');
+            } catch (e) {
+                alert('操作失败: ' + e.message);
+            }
+        }
+
+        async function confirmAddToBlacklist() {
+            const { toAdd, toRemove } = getSelectionCounts();
+            if (toAdd === 0 && toRemove === 0) {
+                alert('请选择要操作的代币');
+                return;
+            }
+            try {
+                // 批量添加
+                for (const key of tokenState.selected) {
+                    if (key.endsWith(':add')) {
+                        const addr = key.slice(0, -4);
+                        await fetch('api/exclusive_blacklist', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({ address: addr })
+                        });
+                    }
+                }
+                // 批量移除
+                for (const key of tokenState.selected) {
+                    if (key.endsWith(':remove')) {
+                        const addr = key.slice(0, -7);
+                        await fetch('api/exclusive_blacklist', {
+                            method: 'DELETE',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({ address: addr })
+                        });
+                    }
+                }
+
+                // 刷新黑名单数据
+                const resp = await fetch('api/exclusive_blacklist');
+                const data = await resp.json();
+                tokenState.blacklistSet = new Set((data.blacklist || []).map(a => a.toLowerCase()));
+                exclusiveBlacklistSet = tokenState.blacklistSet;
+
+                setEditMode(EditMode.NONE);
+                refresh();
+                alert('操作成功');
+            } catch (e) {
+                alert('操作失败: ' + e.message);
             }
         }
 
@@ -1490,21 +1615,21 @@ HTML_TEMPLATE = """
                                     // 优质代币/Alpha代币模式下的前缀标识
                                     let prefixHtml = '';
                                     if (isSpecialMode && r.address) {
-                                        const isInTradeWhitelist = tradeWhitelistSet.has(r.address.toLowerCase());
-                                        const isBlacklisted = showExclusive && exclusiveBlacklistSet.has(r.address.toLowerCase());
+                                        const isInWhitelist = tokenState.whitelistSet.has(r.address.toLowerCase());
+                                        const isInBlacklist = tokenState.viewMode === ViewMode.EXCLUSIVE && tokenState.blacklistSet.has(r.address.toLowerCase());
 
-                                        if (tradeWhitelistMode && !isInTradeWhitelist) {
-                                            // 加入白名单模式，显示复选框
-                                            prefixHtml = `<input type="checkbox" id="tw-check-${r.address.slice(0,8)}" ${selectedTradeWhitelistAddrs.has(r.address) ? 'checked' : ''} onclick="toggleSelectTradeWhitelistAddr('${r.address}')" style="margin-right:6px;cursor:pointer;accent-color:#0ecb81">`;
-                                        } else if (isInTradeWhitelist) {
-                                            // 已在交易白名单中
-                                            prefixHtml = `<span style="margin-right:6px;font-size:12px" title="已在交易白名单">✅</span>`;
-                                        } else if (isBlacklisted) {
-                                            // 已在黑名单中，显示禁止符号，点击可解除
+                                        if (tokenState.editMode === EditMode.BLACKLIST && tokenState.viewMode === ViewMode.EXCLUSIVE) {
+                                            // 黑名单编辑模式
+                                            prefixHtml = `<input type="checkbox" id="bl-check-${r.address.slice(0,8)}" ${shouldBeChecked(r.address, isInBlacklist) ? 'checked' : ''} onclick="toggleSelectBlacklistAddr('${r.address}', ${isInBlacklist})" style="margin-right:6px;cursor:pointer;accent-color:#f6465d">`;
+                                        } else if (tokenState.editMode === EditMode.WHITELIST) {
+                                            // 白名单编辑模式
+                                            prefixHtml = `<input type="checkbox" id="tw-check-${r.address.slice(0,8)}" ${shouldBeChecked(r.address, isInWhitelist) ? 'checked' : ''} onclick="toggleSelectTradeWhitelistAddr('${r.address}', ${isInWhitelist})" style="margin-right:6px;cursor:pointer;accent-color:#0ecb81">`;
+                                        } else if (isInBlacklist) {
+                                            // 已在黑名单中，点击可解除
                                             prefixHtml = `<span onclick="removeFromBlacklistQuick('${r.address}')" style="cursor:pointer;margin-right:6px;font-size:14px" title="点击解除黑名单">🚫</span>`;
-                                        } else if (showExclusive && exclusiveBlacklistMode) {
-                                            // 加黑模式，显示复选框
-                                            prefixHtml = `<input type="checkbox" id="bl-check-${r.address.slice(0,8)}" ${selectedBlacklistAddrs.has(r.address) ? 'checked' : ''} onclick="toggleSelectBlacklistAddr('${r.address}')" style="margin-right:6px;cursor:pointer;accent-color:#f6465d">`;
+                                        } else if (isInWhitelist) {
+                                            // 已在白名单中，点击可移除
+                                            prefixHtml = `<span onclick="removeFromTradeWhitelistQuick('${r.address}')" style="cursor:pointer;margin-right:6px;font-size:12px" title="点击移除白名单">✅</span>`;
                                         }
                                     }
 
@@ -3199,7 +3324,11 @@ def api_get_exclusive_blacklist():
             proxies={'http': None, 'https': None}
         )
         if resp.status_code == 200:
-            return jsonify(resp.json())
+            data = resp.json()
+            # match_service 返回数组，前端期望 {blacklist: [...]}
+            if isinstance(data, list):
+                return jsonify({'blacklist': data})
+            return jsonify(data)
         return jsonify({'blacklist': [], 'error': resp.text}), 400
     except Exception as e:
         return jsonify({'blacklist': [], 'error': str(e)}), 500
@@ -3211,7 +3340,7 @@ def api_add_exclusive_blacklist():
     try:
         data = request.json
         resp = requests.post(
-            f'{config.get_service_url("match")}/exclusive_blacklist',
+            f'{config.get_service_url("match")}/exclusive_blacklist/add',
             json=data,
             timeout=5,
             proxies={'http': None, 'https': None}
@@ -3228,8 +3357,8 @@ def api_remove_exclusive_blacklist():
     """从黑名单移除合约"""
     try:
         data = request.json
-        resp = requests.delete(
-            f'{config.get_service_url("match")}/exclusive_blacklist',
+        resp = requests.post(
+            f'{config.get_service_url("match")}/exclusive_blacklist/remove',
             json=data,
             timeout=5,
             proxies={'http': None, 'https': None}

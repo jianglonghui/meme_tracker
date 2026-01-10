@@ -403,10 +403,12 @@ def send_trade_command(action, address, amount, wait_reply=False):
     """发送交易指令到 Telegram"""
     try:
         url = runtime_config.get('telegram_api_url', DEFAULT_CONFIG['telegram_api_url'])
+        # 卖出时 amount 是 0-1 的比例，转换成 0-100 的百分比
+        send_amount = int(amount * 100) if action == 'sell' else amount
         resp = requests.post(url, json={
             'action': action,
             'address': address,
-            'amount': amount,
+            'amount': send_amount,
             'wait_reply': wait_reply
         }, timeout=15)
 
