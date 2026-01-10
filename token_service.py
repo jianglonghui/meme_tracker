@@ -35,7 +35,7 @@ boost_state = {
     'trigger_author': None,    # 触发高频的作者
     'trigger_time': None,      # 触发时间
 }
-boost_lock = threading.Lock()
+boost_lock = threading.RLock()  # 使用可重入锁，避免嵌套调用死锁
 
 # 代币字典 (key: tokenAddress, value: token data)
 token_dict = {}
