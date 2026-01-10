@@ -47,6 +47,7 @@ def send_to_trade_service(news_data, matched_tokens):
                 'chain': t.get('chain', 'BSC'),
                 'market_cap': t.get('marketCap', 0),
                 'price': t.get('price', '0'),
+                'source': t.get('_token_source') or t.get('source', 'new'),
             })
 
         payload = {

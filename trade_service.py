@@ -788,8 +788,11 @@ def receive_signal():
             })
             continue
 
-        # 新币过滤（仅对通过作者白名单触发的新币进行过滤）
-        if trigger_type == 'author_whitelist':
+        # 新币过滤（仅对新币进行过滤，老币如 exclusive/alpha/binance_search 不过滤）
+        token_source = token.get('source', '')
+        is_new_token = token_source in ('', 'new')
+
+        if is_new_token:
             # 检查代币符号长度（少于5个汉字或3个单词）
             name_valid, name_reason = is_token_name_valid(symbol)
             if not name_valid:
