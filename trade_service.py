@@ -39,6 +39,11 @@ DEFAULT_CONFIG = {
 # 运行时配置
 runtime_config = dict(DEFAULT_CONFIG)
 
+# 优质代币缓存
+exclusive_symbols_cache = set()
+exclusive_cache_time = 0
+EXCLUSIVE_CACHE_TTL = 60  # 缓存60秒
+
 # ==================== 状态 ====================
 stats = {
     'running': True,
@@ -325,6 +330,44 @@ def is_token_name_valid(name):
         if len(words) >= 3:
             return False, f'名称含{len(words)}个单词(>=3)'
         return True, None
+
+
+def get_exclusive_symbols():
+    """获取优质代币（包含alpha）的symbol集合，带缓存"""
+    global exclusive_symbols_cache, exclusive_cache_time
+
+    now = time.time()
+    if exclusive_symbols_cache and (now - exclusive_cache_time) < EXCLUSIVE_CACHE_TTL:
+        return exclusive_symbols_cache
+
+    try:
+        resp = requests.get(
+            f"{config.get_service_url('match')}/exclusive_tokens",
+            timeout=5
+        )
+        if resp.status_code == 200:
+            tokens = resp.json()
+            symbols = set()
+            for t in tokens:
+                symbol = t.get('tokenSymbol', '') or t.get('symbol', '')
+                if symbol:
+                    symbols.add(symbol.upper())
+            exclusive_symbols_cache = symbols
+            exclusive_cache_time = now
+            print(f"[Trade] 更新优质代币缓存: {len(symbols)} 个", flush=True)
+            return symbols
+    except Exception as e:
+        print(f"[Trade] 获取优质代币失败: {e}", flush=True)
+
+    return exclusive_symbols_cache  # 失败时返回旧缓存
+
+
+def is_symbol_in_exclusive(symbol):
+    """检查symbol是否在优质代币（包含alpha）列表中"""
+    if not symbol:
+        return False
+    symbols = get_exclusive_symbols()
+    return symbol.upper() in symbols
 
 
 # ==================== 市值查询 ====================
@@ -761,6 +804,31 @@ def receive_signal():
                 price=token.get('price', '0'),
                 mcap=float(token.get('market_cap', 0) or token.get('marketCap', 0) or 0),
                 response={'filtered': True, 'symbol': symbol},
+                reason=filter_reason
+            )
+
+            results.append({
+                'symbol': symbol,
+                'action': 'filter',
+                'reason': filter_reason
+            })
+            continue
+
+        # 检查是否为优质代币（包含alpha），是则跳过
+        if is_symbol_in_exclusive(symbol):
+            filter_reason = f'优质代币过滤: {symbol}已在优质/Alpha列表中'
+            print(f"[Trade] 过滤 {symbol}: {filter_reason}", flush=True)
+
+            # 记录到交易日志
+            log_trade(
+                position_id='',
+                action='filter',
+                token_symbol=symbol,
+                address=address,
+                amount=0,
+                price=token.get('price', '0'),
+                mcap=float(token.get('market_cap', 0) or token.get('marketCap', 0) or 0),
+                response={'filtered': True, 'symbol': symbol, 'reason': 'exclusive'},
                 reason=filter_reason
             )
 
