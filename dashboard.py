@@ -508,8 +508,12 @@ HTML_TEMPLATE = """
                             </select>
                         </div>
                         <div>
-                            <label style="color:#848e9c;font-size:11px">默认买入金额 (BNB)</label>
-                            <input type="number" id="tradeBuyAmount" step="0.1" min="0.01" style="width:100%;padding:8px;background:#0b0e11;border:1px solid #2b3139;border-radius:4px;color:#eaecef;margin-top:4px" />
+                            <label style="color:#848e9c;font-size:11px">新币买入金额 (BNB)</label>
+                            <input type="number" id="tradeNewTokenAmount" step="0.1" min="0.01" style="width:100%;padding:8px;background:#0b0e11;border:1px solid #2b3139;border-radius:4px;color:#eaecef;margin-top:4px" />
+                        </div>
+                        <div>
+                            <label style="color:#848e9c;font-size:11px">老币买入金额 (BNB)</label>
+                            <input type="number" id="tradeOldTokenAmount" step="0.1" min="0.01" style="width:100%;padding:8px;background:#0b0e11;border:1px solid #2b3139;border-radius:4px;color:#eaecef;margin-top:4px" />
                         </div>
                         <div>
                             <label style="color:#848e9c;font-size:11px">卖出触发倍数</label>
@@ -527,9 +531,15 @@ HTML_TEMPLATE = """
                             <label style="color:#848e9c;font-size:11px">最大持仓数</label>
                             <input type="number" id="tradeMaxPositions" step="1" min="1" max="50" style="width:100%;padding:8px;background:#0b0e11;border:1px solid #2b3139;border-radius:4px;color:#eaecef;margin-top:4px" />
                         </div>
-                        <div>
+                         <div>
                             <label style="color:#848e9c;font-size:11px">无波动超时 (秒, 0=禁用)</label>
                             <input type="number" id="tradeNoChangeTimeout" step="1" min="0" max="300" style="width:100%;padding:8px;background:#0b0e11;border:1px solid #2b3139;border-radius:4px;color:#eaecef;margin-top:4px" />
+                        </div>
+                        <div style="grid-column: span 2">
+                            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;color:#eaecef;font-size:12px">
+                                <input type="checkbox" id="tradeAllowNewTokenByAuthor" style="width:16px;height:16px;accent-color:#f0b90b" />
+                                <span>新币特赦：若作者在白名单，即使代币不在，在新币模式下也买入 (针对“两者满足”模式)</span>
+                            </label>
                         </div>
                     </div>
                     <div style="display:flex;gap:8px;justify-content:flex-end">
@@ -655,6 +665,11 @@ HTML_TEMPLATE = """
             whitelistSet: new Set(),      // 交易白名单集合
             // 选择状态（添加/移除共用，根据原状态判断）
             selected: new Set(),
+            // 加载状态
+            exclusiveLoading: false,
+            alphaLoading: false,
+            exclusiveError: null,
+            alphaError: null,
         };
 
         // 兼容旧变量（渐进重构，避免大面积改动）
@@ -751,9 +766,8 @@ HTML_TEMPLATE = """
                 setViewMode(ViewMode.NORMAL);
             } else {
                 setViewMode(ViewMode.EXCLUSIVE);
-                if (tokenState.exclusiveTokens.length === 0) {
-                    await loadExclusiveTokens();
-                }
+                // 总是重新加载优质代币（确保数据最新）
+                await loadExclusiveTokens();
             }
             refresh();
         }
@@ -771,6 +785,10 @@ HTML_TEMPLATE = """
         }
 
         async function loadExclusiveTokens() {
+            tokenState.exclusiveLoading = true;
+            tokenState.exclusiveError = null;
+            // 强制清除缓存，触发重新渲染显示加载状态
+            lastServiceData['token_service'] = '';
             try {
                 const [tokenResp, blacklistResp, tradeWhitelistResp] = await Promise.all([
                     fetch('api/exclusive'),
@@ -781,7 +799,13 @@ HTML_TEMPLATE = """
                 const blacklistData = await blacklistResp.json();
                 const tradeWlData = await tradeWhitelistResp.json();
 
-                tokenState.exclusiveTokens = tokenData.items || [];
+                // 检查 API 返回的错误
+                if (tokenData.error) {
+                    tokenState.exclusiveError = tokenData.error;
+                    tokenState.exclusiveTokens = [];
+                } else {
+                    tokenState.exclusiveTokens = tokenData.items || [];
+                }
                 tokenState.blacklistSet = new Set((blacklistData.blacklist || []).map(a => a.toLowerCase()));
                 tokenState.whitelistSet = new Set((tradeWlData.tokens || []).map(t => (t.address || t).toLowerCase()));
                 // 兼容旧引用
@@ -790,12 +814,20 @@ HTML_TEMPLATE = """
                 tradeWhitelistSet = tokenState.whitelistSet;
             } catch (e) {
                 console.error('加载优质代币失败:', e);
+                tokenState.exclusiveError = e.message || '网络错误';
                 tokenState.exclusiveTokens = [];
                 exclusiveTokens = [];
+            } finally {
+                tokenState.exclusiveLoading = false;
+                // 强制清除缓存，触发重新渲染
+                lastServiceData['token_service'] = '';
             }
         }
 
         async function loadAlphaTokens() {
+            tokenState.alphaLoading = true;
+            tokenState.alphaError = null;
+            lastServiceData['token_service'] = '';
             try {
                 const [tokenResp, tradeWhitelistResp] = await Promise.all([
                     fetch('api/alpha'),
@@ -804,15 +836,24 @@ HTML_TEMPLATE = """
                 const tokenData = await tokenResp.json();
                 const tradeWlData = await tradeWhitelistResp.json();
 
-                tokenState.alphaTokens = tokenData.items || [];
+                if (tokenData.error) {
+                    tokenState.alphaError = tokenData.error;
+                    tokenState.alphaTokens = [];
+                } else {
+                    tokenState.alphaTokens = tokenData.items || [];
+                }
                 tokenState.whitelistSet = new Set((tradeWlData.tokens || []).map(t => (t.address || t).toLowerCase()));
                 // 兼容旧引用
                 alphaTokens = tokenState.alphaTokens;
                 tradeWhitelistSet = tokenState.whitelistSet;
             } catch (e) {
                 console.error('加载Alpha代币失败:', e);
+                tokenState.alphaError = e.message || '网络错误';
                 tokenState.alphaTokens = [];
                 alphaTokens = [];
+            } finally {
+                tokenState.alphaLoading = false;
+                lastServiceData['token_service'] = '';
             }
         }
 
@@ -1648,7 +1689,28 @@ HTML_TEMPLATE = """
                                     return `<div class="data-item">${prefixHtml}${chainBadge}<span class="symbol" style="cursor:pointer" title="点击复制" onclick="copyText('${r.symbol}')">${r.symbol}</span> ${r.name}${caHtml} <span class="time">${timeStr} | MC:${r.marketCap} H:${r.holders}${extraInfo}</span></div>`;
                                 }).join('')}</div>`;
                         } else {
-                            dataHtml += `<div class="no-data" style="padding:10px;color:#848e9c">${isSpecialMode ? '加载中...' : '暂无代币'}</div>`;
+                            // 根据加载状态显示不同消息
+                            let noDataMsg = '暂无代币';
+                            if (isSpecialMode) {
+                                if (tokenState.viewMode === ViewMode.EXCLUSIVE) {
+                                    if (tokenState.exclusiveLoading) {
+                                        noDataMsg = '加载中...';
+                                    } else if (tokenState.exclusiveError) {
+                                        noDataMsg = '加载失败: ' + tokenState.exclusiveError;
+                                    } else {
+                                        noDataMsg = '暂无优质代币';
+                                    }
+                                } else if (tokenState.viewMode === ViewMode.ALPHA) {
+                                    if (tokenState.alphaLoading) {
+                                        noDataMsg = '加载中...';
+                                    } else if (tokenState.alphaError) {
+                                        noDataMsg = '加载失败: ' + tokenState.alphaError;
+                                    } else {
+                                        noDataMsg = '暂无Alpha代币';
+                                    }
+                                }
+                            }
+                            dataHtml += `<div class="no-data" style="padding:10px;color:#848e9c">${noDataMsg}</div>`;
                         }
                         dataHtml += `</div>`;
                         if (errors.length > 0) {
@@ -2688,13 +2750,15 @@ HTML_TEMPLATE = """
             try {
                 const resp = await fetch('api/trade/config');
                 tradeConfig = await resp.json();
-                document.getElementById('tradeBuyAmount').value = tradeConfig.default_buy_amount || 0.5;
+                document.getElementById('tradeNewTokenAmount').value = tradeConfig.new_token_buy_amount || tradeConfig.default_buy_amount || 0.5;
+                document.getElementById('tradeOldTokenAmount').value = tradeConfig.old_token_buy_amount || 0.3;
                 document.getElementById('tradeSellMultiple').value = tradeConfig.sell_trigger_multiple || 2.0;
                 document.getElementById('tradeSellPct').value = tradeConfig.sell_percentage || 0.5;
                 document.getElementById('tradeStopLoss').value = tradeConfig.stop_loss_ratio || 0.5;
                 document.getElementById('tradeMaxPositions').value = tradeConfig.max_positions || 10;
                 document.getElementById('tradeWhitelistMode').value = tradeConfig.whitelist_mode || 'any';
                 document.getElementById('tradeNoChangeTimeout').value = tradeConfig.no_change_timeout ?? 20;
+                document.getElementById('tradeAllowNewTokenByAuthor').checked = tradeConfig.allow_new_token_by_author ?? true;
                 updateTradeEnabledBtn(tradeConfig.enabled);
             } catch (e) {
                 console.error('加载交易配置失败:', e);
@@ -2733,13 +2797,15 @@ HTML_TEMPLATE = """
 
         async function saveTradeConfig() {
             const config = {
-                default_buy_amount: parseFloat(document.getElementById('tradeBuyAmount').value) || 0.5,
+                new_token_buy_amount: parseFloat(document.getElementById('tradeNewTokenAmount').value) || 0.5,
+                old_token_buy_amount: parseFloat(document.getElementById('tradeOldTokenAmount').value) || 0.3,
                 sell_trigger_multiple: parseFloat(document.getElementById('tradeSellMultiple').value) || 2.0,
                 sell_percentage: parseFloat(document.getElementById('tradeSellPct').value) || 0.5,
                 stop_loss_ratio: parseFloat(document.getElementById('tradeStopLoss').value) || 0.5,
                 max_positions: parseInt(document.getElementById('tradeMaxPositions').value) || 10,
                 whitelist_mode: document.getElementById('tradeWhitelistMode').value || 'any',
-                no_change_timeout: parseInt(document.getElementById('tradeNoChangeTimeout').value) ?? 20
+                no_change_timeout: parseInt(document.getElementById('tradeNoChangeTimeout').value) ?? 20,
+                allow_new_token_by_author: document.getElementById('tradeAllowNewTokenByAuthor').checked
             };
             try {
                 const resp = await fetch('api/trade/config', {
@@ -2864,8 +2930,15 @@ HTML_TEMPLATE = """
                 };
 
                 container.innerHTML = history.map(h => {
-                    const actionColor = h.action === 'buy' ? '#0ecb81' : '#f6465d';
-                    const actionText = h.action === 'buy' ? '买入' : '卖出';
+                    let actionColor = '#f6465d'; // Default red for sell/error
+                    let actionText = '卖出';
+                    if (h.action === 'buy') {
+                        actionColor = '#0ecb81';
+                        actionText = '买入';
+                    } else if (h.action === 'filter') {
+                        actionColor = '#848e9c';
+                        actionText = '过滤';
+                    }
                     const reasonText = reasonMap[h.reason] || h.reason || '-';
                     return `
                         <div style="background:#0b0e11;padding:8px 12px;border-radius:4px;margin-bottom:4px">

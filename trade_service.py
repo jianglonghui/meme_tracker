@@ -26,7 +26,9 @@ DB_PATH = os.path.join(os.path.dirname(__file__), 'trade.db')
 # 默认配置
 DEFAULT_CONFIG = {
     'enabled': True,
-    'default_buy_amount': 0.5,      # 默认买入 BNB
+    'default_buy_amount': 0.5,      # 默认买入 BNB（兼容旧配置）
+    'new_token_buy_amount': 0.5,    # 新币买入金额 BNB
+    'old_token_buy_amount': 0.3,    # 老币买入金额 BNB
     'sell_trigger_multiple': 2.0,   # 翻倍触发卖出
     'sell_percentage': 0.5,         # 每次卖出比例
     'stop_loss_ratio': 0.5,         # 跌到买入价的50%止损
@@ -35,6 +37,7 @@ DEFAULT_CONFIG = {
     'monitor_interval': 1.0,        # 监控间隔（秒）
     'whitelist_mode': 'any',        # 白名单模式: 'any'=任一满足, 'author'=仅作者, 'token'=仅代币, 'both'=两者都要
     'no_change_timeout': 20,        # 无波动超时（秒），0=禁用
+    'allow_new_token_by_author': True, # 新币模式：如果作者在白名单，即使代币不在白名单也买入（针对 'both' 模式）
 }
 
 # 运行时配置
@@ -475,27 +478,44 @@ def get_token_mcap(address):
 
 def send_trade_command(action, address, amount, wait_reply=False):
     """发送交易指令到 Telegram"""
-    try:
-        url = runtime_config.get('telegram_api_url', DEFAULT_CONFIG['telegram_api_url'])
-        # 卖出时 amount 是 0-1 的比例，转换成 0-100 的百分比
-        send_amount = int(amount * 100) if action == 'sell' else amount
-        resp = requests.post(url, json={
-            'action': action,
-            'address': address,
-            'amount': send_amount,
-            'wait_reply': wait_reply
-        }, timeout=15)
+    max_retries = 3
+    retry_count = 0
+    UNKNOWN_STATUS_MSG = "⚠️ Transaction status unknown, please check on Explore"
 
-        if resp.status_code == 200:
-            result = resp.json()
-            print(f"[Trade] {action.upper()} {address[:10]}... {amount} - 成功", flush=True)
-            return result
-        else:
-            log_error(f"交易指令失败: HTTP {resp.status_code}")
-            return {'success': False, 'error': f'HTTP {resp.status_code}'}
-    except Exception as e:
-        log_error(f"交易指令异常: {e}")
-        return {'success': False, 'error': str(e)}
+    while retry_count < max_retries:
+        try:
+            url = runtime_config.get('telegram_api_url', DEFAULT_CONFIG['telegram_api_url'])
+            # 卖出时 amount 是 0-1 的比例，转换成 0-100 的百分比
+            send_amount = int(amount * 100) if action == 'sell' else amount
+            resp = requests.post(url, json={
+                'action': action,
+                'address': address,
+                'amount': send_amount,
+                'wait_reply': wait_reply
+            }, timeout=15)
+
+            if resp.status_code == 200:
+                result = resp.json()
+                # 检查回复内容是否包含“状态未知”，如果包含则重试
+                # 根据上一级 TG 接口确认，bot 的回复内容在 'reply' 字段中
+                reply_msg = str(result.get('reply', '')) or str(result.get('error', ''))
+                if UNKNOWN_STATUS_MSG in reply_msg:
+                    retry_count += 1
+                    print(f"[Trade] {action.upper()} {address[:10]}... 收到未知状态回复，准备第 {retry_count} 次重试", flush=True)
+                    time.sleep(1) # 短暂等待后重试
+                    continue
+
+                print(f"[Trade] {action.upper()} {address[:10]}... {amount} - 成功", flush=True)
+                return result
+            else:
+                log_error(f"交易指令失败: HTTP {resp.status_code}")
+                return {'success': False, 'error': f'HTTP {resp.status_code}'}
+        except Exception as e:
+            log_error(f"交易指令异常: {e}")
+            return {'success': False, 'error': str(e)}
+        
+    log_error(f"交易指令重试 {max_retries} 次后仍然失败 (状态未知)")
+    return {'success': False, 'error': 'Max retries exceeded for unknown status'}
 
 
 def execute_buy(token_data, trigger_type):
@@ -522,7 +542,14 @@ def execute_buy(token_data, trigger_type):
         if existing_pos:
             print(f"[Trade] {symbol} 再次触发，加仓", flush=True)
 
-    buy_amount = runtime_config.get('default_buy_amount', 0.5)
+    # 根据新币/老币使用不同买入金额
+    is_new_token = token_data.get('is_new_token', True)
+    if is_new_token:
+        buy_amount = runtime_config.get('new_token_buy_amount', runtime_config.get('default_buy_amount', 0.5))
+    else:
+        buy_amount = runtime_config.get('old_token_buy_amount', runtime_config.get('default_buy_amount', 0.3))
+
+    print(f"[Trade] {'新币' if is_new_token else '老币'} {symbol} 买入金额: {buy_amount} BNB", flush=True)
 
     # 发送买入指令
     result = send_trade_command('buy', address, buy_amount, wait_reply=True)
@@ -688,6 +715,7 @@ def monitor_positions():
 
                     # 无波动检查: 计算最近 N 秒市值的变异系数(CV)
                     should_sell_no_change = False
+                    no_change_data = None
                     if no_change_timeout > 0:
                         with positions_lock:
                             if pos['id'] in positions:
@@ -701,14 +729,32 @@ def monitor_positions():
                                         variance = sum((m - mean_mcap) ** 2 for m in recent_mcaps) / len(recent_mcaps)
                                         std_dev = variance ** 0.5
                                         cv = std_dev / mean_mcap
+                                        min_mcap = min(recent_mcaps)
+                                        max_mcap = max(recent_mcaps)
 
                                         # CV < 0.1% 视为无波动
                                         if cv < 0.001:
-                                            print(f"[Trade] {pos['symbol']} 触发无波动卖出 (CV={cv:.6f}, {len(recent_mcaps)}点)", flush=True)
+                                            # 记录详细数据用于分析
+                                            no_change_data = {
+                                                'mcaps': list(recent_mcaps),
+                                                'cv': cv,
+                                                'mean': mean_mcap,
+                                                'std': std_dev,
+                                                'min': min_mcap,
+                                                'max': max_mcap,
+                                                'range': max_mcap - min_mcap,
+                                                'points': len(recent_mcaps)
+                                            }
+                                            print(f"[Trade] {pos['symbol']} 触发无波动卖出:", flush=True)
+                                            print(f"  CV={cv:.6f}, mean={mean_mcap:.2f}, std={std_dev:.2f}", flush=True)
+                                            print(f"  min={min_mcap:.2f}, max={max_mcap:.2f}, range={max_mcap-min_mcap:.2f}", flush=True)
+                                            print(f"  数据点({len(recent_mcaps)}): {[round(m, 2) for m in recent_mcaps]}", flush=True)
                                             should_sell_no_change = True
 
                     if should_sell_no_change:
-                        execute_sell(pos, 1.0, 'no_change')
+                        # 将无波动数据作为 reason 的一部分记录
+                        reason_detail = f"no_change|CV:{no_change_data['cv']:.6f}|mean:{no_change_data['mean']:.0f}|range:{no_change_data['range']:.0f}"
+                        execute_sell(pos, 1.0, reason_detail)
                         continue
 
                     # 止损检查: 跌到 50% 以下全卖
@@ -804,7 +850,7 @@ def receive_signal():
         if not address:
             continue
 
-        # 检查白名单
+        # 1. 检查白名单
         trigger_type = None
         whitelist_mode = runtime_config.get('whitelist_mode', 'any')
         author_in_wl = is_author_whitelisted(author)
@@ -822,6 +868,12 @@ def receive_signal():
             # 两者都要满足
             if author_in_wl and token_in_wl:
                 trigger_type = 'both_whitelist'
+            # 特殊情况：如果开启了“新币按作者买入”，且是新币，且作者在白名单，则允许
+            elif author_in_wl and runtime_config.get('allow_new_token_by_author', False):
+                # 检查是否为新币
+                token_source = token.get('source', '')
+                if token_source in ('', 'new'):
+                    trigger_type = 'new_token_author_whitelist'
         else:  # 'any' - 任一满足
             if author_in_wl:
                 trigger_type = 'author_whitelist'
@@ -830,25 +882,40 @@ def receive_signal():
 
         if not trigger_type:
             mode_desc = {'any': '任一白名单', 'author': '作者白名单', 'token': '代币白名单', 'both': '作者+代币白名单'}
+            filter_reason = f'不满足{mode_desc.get(whitelist_mode, "白名单")}条件'
+            
+            # 记录到交易历史
+            log_trade(
+                position_id='',
+                action='filter',
+                token_symbol=symbol,
+                address=address,
+                amount=0,
+                price=token.get('price', '0'),
+                mcap=float(token.get('market_cap', 0) or token.get('marketCap', 0) or 0),
+                response={'filtered': True, 'symbol': symbol, 'reason': 'whitelist'},
+                reason=filter_reason
+            )
+
             results.append({
                 'symbol': symbol,
                 'action': 'skip',
-                'reason': f'不满足{mode_desc.get(whitelist_mode, "白名单")}条件'
+                'reason': filter_reason
             })
             continue
 
-        # 新币过滤（仅对新币进行过滤，老币如 exclusive/alpha/binance_search 不过滤）
+        # 2. 对新币进行额外过滤（名称长度、是否已在优质列表）
         token_source = token.get('source', '')
         is_new_token = token_source in ('', 'new')
 
         if is_new_token:
-            # 检查代币符号长度（少于5个汉字或3个单词）
+            # 2.1 检查代币名称长度（只针对新币）
             name_valid, name_reason = is_token_name_valid(symbol)
             if not name_valid:
-                filter_reason = f'符号过滤: {name_reason}'
-                print(f"[Trade] 过滤 {symbol}: {filter_reason}", flush=True)
+                filter_reason = f'新币符号过滤: {name_reason}'
+                print(f"[Trade] 过滤新币 {symbol}: {filter_reason}", flush=True)
 
-                # 记录到交易日志
+                # 记录到交易历史
                 log_trade(
                     position_id='',
                     action='filter',
@@ -868,12 +935,12 @@ def receive_signal():
                 })
                 continue
 
-            # 检查是否为优质代币（包含alpha），是则跳过
+            # 2.2 检查是否为优质代币（包含alpha），对于新币源进行过滤，避免重复买入
             if is_symbol_in_exclusive(symbol):
                 filter_reason = f'优质代币过滤: {symbol}已在优质/Alpha列表中'
                 print(f"[Trade] 过滤 {symbol}: {filter_reason}", flush=True)
 
-                # 记录到交易日志
+                # 记录到交易历史
                 log_trade(
                     position_id='',
                     action='filter',
@@ -902,6 +969,7 @@ def receive_signal():
             'market_cap': float(token.get('market_cap', 0) or token.get('marketCap', 0) or 0),
             'price': token.get('price', '0'),
             'author': author,
+            'is_new_token': is_new_token,  # 是否为新币
         }
 
         # 执行买入
@@ -1005,10 +1073,10 @@ def handle_config():
         return jsonify({'success': False, 'error': '无数据'}), 400
 
     # 更新配置
-    for key in ['enabled', 'default_buy_amount', 'sell_trigger_multiple',
-                'sell_percentage', 'stop_loss_ratio', 'max_positions',
+    for key in ['enabled', 'default_buy_amount', 'new_token_buy_amount', 'old_token_buy_amount',
+                'sell_trigger_multiple', 'sell_percentage', 'stop_loss_ratio', 'max_positions',
                 'telegram_api_url', 'monitor_interval', 'whitelist_mode',
-                'no_change_timeout']:
+                'no_change_timeout', 'allow_new_token_by_author']:
         if key in data:
             runtime_config[key] = data[key]
 

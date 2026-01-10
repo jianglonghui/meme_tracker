@@ -404,8 +404,8 @@ def add_to_monitoring(contract_address, symbol, name, chain, market_cap, group_n
         return True
 
 
-def push_double_notification(contract_info, current_mcap, gain_ratio):
-    """推送翻倍通知到 Telegram"""
+def push_double_notification(contract_info, current_mcap, gain_ratio, notify_reason=''):
+    """推送市值变化通知到 Telegram"""
     try:
         payload = {
             'address': contract_info.get('address', ''),
@@ -418,7 +418,8 @@ def push_double_notification(contract_info, current_mcap, gain_ratio):
             'group_name': contract_info.get('group_name', ''),
             'sender': contract_info.get('sender', ''),
             'history': contract_info.get('history', []),
-            'elapsed_seconds': int(time.time() - contract_info.get('start_time', time.time()))
+            'elapsed_seconds': int(time.time() - contract_info.get('start_time', time.time())),
+            'reason': notify_reason,  # 通知原因：翻倍/跌幅/区间变化
         }
         resp = requests.post(
             TELEGRAM_PUSH_URL,
@@ -427,7 +428,7 @@ def push_double_notification(contract_info, current_mcap, gain_ratio):
             proxies={'http': None, 'https': None}
         )
         if resp.status_code == 200:
-            print(f"[推送] {contract_info.get('symbol', '')} 翻倍通知已发送", flush=True)
+            print(f"[推送] {contract_info.get('symbol', '')} {notify_reason} 通知已发送", flush=True)
             return True
         else:
             print(f"[推送] 失败: HTTP {resp.status_code}", flush=True)
@@ -540,7 +541,7 @@ def monitor_thread():
             if should_notify:
                 print(f"[推送] {info['symbol'] or addr[:10]} {notify_reason} 市值: ${start_mcap/1000:.0f}k → ${current_mcap/1000:.0f}k", flush=True)
 
-                if push_double_notification(info, current_mcap, gain_ratio):
+                if push_double_notification(info, current_mcap, gain_ratio, notify_reason):
                     stats['doubled'] += 1
 
                 # 翻倍或大跌后移除监测
