@@ -301,6 +301,32 @@ def is_token_whitelisted(address):
     return False
 
 
+def is_token_name_valid(name):
+    """
+    检查代币名称是否符合长度要求
+    - 中文名：少于5个汉字
+    - 英文名：少于3个单词
+    返回: (is_valid, reason)
+    """
+    if not name:
+        return True, None  # 空名称视为通过
+
+    # 统计汉字数量
+    chinese_chars = sum(1 for c in name if '\u4e00' <= c <= '\u9fff')
+
+    if chinese_chars > 0:
+        # 有汉字，按汉字计数
+        if chinese_chars >= 5:
+            return False, f'名称含{chinese_chars}个汉字(>=5)'
+        return True, None
+    else:
+        # 纯英文，按单词计数
+        words = [w for w in name.strip().split() if w]
+        if len(words) >= 3:
+            return False, f'名称含{len(words)}个单词(>=3)'
+        return True, None
+
+
 # ==================== 市值查询 ====================
 
 def get_token_mcap_dex(address):
@@ -716,6 +742,33 @@ def receive_signal():
                 'symbol': symbol,
                 'action': 'skip',
                 'reason': f'不满足{mode_desc.get(whitelist_mode, "白名单")}条件'
+            })
+            continue
+
+        # 检查代币名称长度（少于5个汉字或3个单词）
+        token_name = token.get('token_name', '') or token.get('name', '') or ''
+        name_valid, name_reason = is_token_name_valid(token_name)
+        if not name_valid:
+            filter_reason = f'名称过滤: {name_reason}'
+            print(f"[Trade] 过滤 {symbol} ({token_name}): {filter_reason}", flush=True)
+
+            # 记录到交易日志
+            log_trade(
+                position_id='',
+                action='filter',
+                token_symbol=symbol,
+                address=address,
+                amount=0,
+                price=token.get('price', '0'),
+                mcap=float(token.get('market_cap', 0) or token.get('marketCap', 0) or 0),
+                response={'filtered': True, 'name': token_name},
+                reason=filter_reason
+            )
+
+            results.append({
+                'symbol': symbol,
+                'action': 'filter',
+                'reason': filter_reason
             })
             continue
 
