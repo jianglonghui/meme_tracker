@@ -342,24 +342,42 @@ def is_token_whitelisted(address):
 
 def is_token_name_valid(name):
     """
-    检查代币名称是否符合长度要求
-    - 中文名：少于5个汉字
-    - 英文名：少于3个单词
+    检查代币名称是否符合要求
+    1. 如果包含中文，则不允许包含数字、空格或符号（只允许汉字、字母）
+    2. 中文名：少于5个汉字
+    3. 英文名：少于3个单词
     返回: (is_valid, reason)
     """
     if not name:
-        return True, None  # 空名称视为通过
+        return True, None
 
     # 统计汉字数量
     chinese_chars = sum(1 for c in name if '\u4e00' <= c <= '\u9fff')
-
+    
     if chinese_chars > 0:
-        # 有汉字，按汉字计数
-        if chinese_chars >= 5:
-            return False, f'名称含{chinese_chars}个汉字(>=5)'
+        # 1. 检查是否含有非法字符（只允许汉字、字母）
+        for c in name:
+            # 汉字范围
+            if '\u4e00' <= c <= '\u9fff':
+                continue
+            # 字母范围
+            if 'a' <= c.lower() <= 'z':
+                continue
+            
+            # 这里的 c 是空格、数字或符号
+            if c.isspace():
+                return False, '中空混合'
+            if '0' <= c <= '9':
+                return False, '中数混合'
+            return False, f'中符混合 (含 {c})'
+
+        # 2. 长度检查：汉字数量是否少于5个
+        if chinese_chars > 5:
+            return False, f'名称含{chinese_chars}个汉字(>5)'
         return True, None
     else:
-        # 纯英文，按单词计数
+        # 纯英文/数字模式（或无汉字模式）
+        # 这里维持原样：允许数字和符号，单词数少于3个
         words = [w for w in name.strip().split() if w]
         if len(words) >= 3:
             return False, f'名称含{len(words)}个单词(>=3)'
