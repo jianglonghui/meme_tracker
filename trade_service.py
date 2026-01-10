@@ -790,56 +790,58 @@ def receive_signal():
             })
             continue
 
-        # 检查代币符号长度（少于5个汉字或3个单词）
-        name_valid, name_reason = is_token_name_valid(symbol)
-        if not name_valid:
-            filter_reason = f'符号过滤: {name_reason}'
-            print(f"[Trade] 过滤 {symbol}: {filter_reason}", flush=True)
+        # 新币过滤（仅对通过作者白名单触发的新币进行过滤）
+        if trigger_type == 'author_whitelist':
+            # 检查代币符号长度（少于5个汉字或3个单词）
+            name_valid, name_reason = is_token_name_valid(symbol)
+            if not name_valid:
+                filter_reason = f'符号过滤: {name_reason}'
+                print(f"[Trade] 过滤 {symbol}: {filter_reason}", flush=True)
 
-            # 记录到交易日志
-            log_trade(
-                position_id='',
-                action='filter',
-                token_symbol=symbol,
-                address=address,
-                amount=0,
-                price=token.get('price', '0'),
-                mcap=float(token.get('market_cap', 0) or token.get('marketCap', 0) or 0),
-                response={'filtered': True, 'symbol': symbol},
-                reason=filter_reason
-            )
+                # 记录到交易日志
+                log_trade(
+                    position_id='',
+                    action='filter',
+                    token_symbol=symbol,
+                    address=address,
+                    amount=0,
+                    price=token.get('price', '0'),
+                    mcap=float(token.get('market_cap', 0) or token.get('marketCap', 0) or 0),
+                    response={'filtered': True, 'symbol': symbol},
+                    reason=filter_reason
+                )
 
-            results.append({
-                'symbol': symbol,
-                'action': 'filter',
-                'reason': filter_reason
-            })
-            continue
+                results.append({
+                    'symbol': symbol,
+                    'action': 'filter',
+                    'reason': filter_reason
+                })
+                continue
 
-        # 检查是否为优质代币（包含alpha），是则跳过
-        if is_symbol_in_exclusive(symbol):
-            filter_reason = f'优质代币过滤: {symbol}已在优质/Alpha列表中'
-            print(f"[Trade] 过滤 {symbol}: {filter_reason}", flush=True)
+            # 检查是否为优质代币（包含alpha），是则跳过
+            if is_symbol_in_exclusive(symbol):
+                filter_reason = f'优质代币过滤: {symbol}已在优质/Alpha列表中'
+                print(f"[Trade] 过滤 {symbol}: {filter_reason}", flush=True)
 
-            # 记录到交易日志
-            log_trade(
-                position_id='',
-                action='filter',
-                token_symbol=symbol,
-                address=address,
-                amount=0,
-                price=token.get('price', '0'),
-                mcap=float(token.get('market_cap', 0) or token.get('marketCap', 0) or 0),
-                response={'filtered': True, 'symbol': symbol, 'reason': 'exclusive'},
-                reason=filter_reason
-            )
+                # 记录到交易日志
+                log_trade(
+                    position_id='',
+                    action='filter',
+                    token_symbol=symbol,
+                    address=address,
+                    amount=0,
+                    price=token.get('price', '0'),
+                    mcap=float(token.get('market_cap', 0) or token.get('marketCap', 0) or 0),
+                    response={'filtered': True, 'symbol': symbol, 'reason': 'exclusive'},
+                    reason=filter_reason
+                )
 
-            results.append({
-                'symbol': symbol,
-                'action': 'filter',
-                'reason': filter_reason
-            })
-            continue
+                results.append({
+                    'symbol': symbol,
+                    'action': 'filter',
+                    'reason': filter_reason
+                })
+                continue
 
         # 准备代币数据
         token_data = {
