@@ -35,7 +35,7 @@ boost_state = {
     'trigger_author': None,    # 触发高频的作者
     'trigger_time': None,      # 触发时间
 }
-boost_lock = threading.RLock()  # 使用可重入锁，避免嵌套调用死锁
+boost_lock = threading.Lock()
 
 # 代币字典 (key: tokenAddress, value: token data)
 token_dict = {}
@@ -332,12 +332,14 @@ def stream():
 @app.route('/status')
 def status():
     with boost_lock:
+        current_time = time.time()
+        is_active = boost_state['active'] and current_time < boost_state['expire_time']
         boost_info = {
-            'boost_active': boost_state['active'] and time.time() < boost_state['expire_time'],
-            'boost_expire_time': boost_state['expire_time'] if boost_state['active'] else None,
-            'boost_remaining': max(0, boost_state['expire_time'] - time.time()) if boost_state['active'] else 0,
-            'boost_trigger_author': boost_state['trigger_author'],
-            'current_interval': get_current_interval(),
+            'boost_active': is_active,
+            'boost_expire_time': boost_state['expire_time'] if is_active else None,
+            'boost_remaining': max(0, boost_state['expire_time'] - current_time) if is_active else 0,
+            'boost_trigger_author': boost_state['trigger_author'] if is_active else None,
+            'current_interval': BOOST_INTERVAL if is_active else NORMAL_INTERVAL,
             'normal_interval': NORMAL_INTERVAL,
             'boost_interval': BOOST_INTERVAL,
         }
@@ -371,7 +373,7 @@ def boost_status():
         is_active = boost_state['active'] and current_time < boost_state['expire_time']
         return jsonify({
             'active': is_active,
-            'current_interval': get_current_interval(),
+            'current_interval': BOOST_INTERVAL if is_active else NORMAL_INTERVAL,
             'expire_time': boost_state['expire_time'] if is_active else None,
             'remaining_seconds': max(0, boost_state['expire_time'] - current_time) if is_active else 0,
             'trigger_author': boost_state['trigger_author'] if is_active else None,
