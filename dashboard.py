@@ -1148,8 +1148,10 @@ HTML_TEMPLATE = """
                     const boostActive = d.boost_active;
                     const boostStyle = boostActive ? 'color:#f0b90b;font-weight:bold' : 'color:#848e9c';
                     const boostText = boostActive ? `⚡高频 (${Math.ceil(d.boost_remaining || 0)}s)` : '普通';
+                    const freqText = `${d.fetch_count_60s || 0}次/分`;
                     statsHtml = `<div class="stat-item">代币: <span class="stat-value">${d.total_tokens || 0}</span></div>
                                 <div class="stat-item">模式: <span class="stat-value" style="${boostStyle}">${boostText}</span></div>
+                                <div class="stat-item">频率: <span class="stat-value">${freqText}</span></div>
                                 <div class="stat-item">最后成功: <span class="stat-value" id="token_service-last-success">${formatTime(d.last_success)}</span></div>
                                 <div class="stat-item">错误: <span class="stat-value ${hasErrors?'error':''}">${d.errors || 0}</span></div>`;
                 } else if (s.name === 'match_service') {
@@ -1176,10 +1178,13 @@ HTML_TEMPLATE = """
                     const tradeEnabled = d.enabled !== false;
                     const toggleColor = tradeEnabled ? '#0ecb81' : '#f6465d';
                     const toggleText = tradeEnabled ? '已启用' : '已禁用';
+                    const apiFreq = d.api_call_count_60s || 0;
+                    const freqStyle = apiFreq > 0 ? 'color:#f0b90b' : 'color:#848e9c';
                     statsHtml = `<div class="stat-item">信号: <span class="stat-value">${d.total_signals || 0}</span></div>
                                 <div class="stat-item">买入: <span class="stat-value" style="color:#0ecb81">${d.total_buys || 0}</span></div>
                                 <div class="stat-item">卖出: <span class="stat-value" style="color:#f6465d">${d.total_sells || 0}</span></div>
                                 <div class="stat-item">持仓: <span class="stat-value" style="color:#F0B90B">${d.active_positions || 0}</span></div>
+                                <div class="stat-item">频率: <span class="stat-value" style="${freqStyle}">${apiFreq}次/分</span></div>
                                 <div class="stat-item">
                                     <button onclick="openTradeModal()" style="background:${toggleColor};color:#fff;border:none;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:10px">${toggleText}</button>
                                 </div>`;
@@ -2756,13 +2761,15 @@ HTML_TEMPLATE = """
                             total_buy_amount: 0,
                             total_buy_mcap: 0,
                             current_mcap: p.current_mcap,
-                            trigger_types: new Set()
+                            trigger_types: new Set(),
+                            api_call_count_60s: p.api_call_count_60s || 0
                         };
                     }
                     mergedPositions[addr].positions.push(p);
                     mergedPositions[addr].total_buy_amount += p.buy_amount || 0;
                     mergedPositions[addr].total_buy_mcap += (p.buy_mcap || 0) * (p.buy_amount || 1);
                     mergedPositions[addr].trigger_types.add(p.trigger_type || '');
+                    mergedPositions[addr].api_call_count_60s = p.api_call_count_60s || 0;
                 });
 
                 container.innerHTML = Object.values(mergedPositions).map(m => {
@@ -2772,6 +2779,8 @@ HTML_TEMPLATE = """
                     const changeSign = changePct >= 0 ? '+' : '';
                     const triggers = Array.from(m.trigger_types).filter(t => t).join(', ') || '-';
                     const posCount = m.positions.length;
+                    const apiFreq = m.api_call_count_60s || 0;
+                    const freqStyle = apiFreq > 0 ? 'color:#f0b90b' : 'color:#848e9c';
 
                     return `
                         <div style="background:#0b0e11;padding:12px;border-radius:4px;margin-bottom:8px">
@@ -2783,7 +2792,7 @@ HTML_TEMPLATE = """
                                 买入: $${(avgBuyMcap/1e6).toFixed(2)}M → 当前: $${(m.current_mcap/1e6).toFixed(2)}M
                             </div>
                             <div style="font-size:11px;color:#848e9c;margin-bottom:8px">
-                                投入: ${m.total_buy_amount.toFixed(2)} BNB | 触发: ${triggers}
+                                投入: ${m.total_buy_amount.toFixed(2)} BNB | 触发: ${triggers} | <span style="${freqStyle}">频率: ${apiFreq}次/分</span>
                             </div>
                             <div style="display:flex;gap:8px">
                                 ${m.positions.map(p => `<button onclick="closePosition('${p.id}')" style="background:#f6465d;color:#fff;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:10px">平仓${posCount > 1 ? '#' + (m.positions.indexOf(p) + 1) : ''}</button>`).join('')}

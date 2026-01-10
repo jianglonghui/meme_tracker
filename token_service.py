@@ -18,7 +18,8 @@ stats = {
     'running': True,
     'last_fetch': None,
     'last_success': None,
-    'errors': 0
+    'errors': 0,
+    'fetch_times': [],  # 最近60秒的调用时间戳
 }
 
 # ==================== 智能调频配置 ====================
@@ -292,7 +293,12 @@ def token_fetcher():
     print(f"[智能调频] 普通模式: {NORMAL_INTERVAL}秒/次, 高频模式: {BOOST_INTERVAL}秒/次", flush=True)
     while stats['running']:
         fetch_tokens()
-        stats['last_fetch'] = time.time()
+        now = time.time()
+        stats['last_fetch'] = now
+        # 记录调用时间，用于计算实际频率
+        stats['fetch_times'].append(now)
+        # 只保留最近60秒的记录
+        stats['fetch_times'] = [t for t in stats['fetch_times'] if now - t < 60]
         interval = get_current_interval()
         time.sleep(interval)
 
@@ -331,8 +337,8 @@ def stream():
 
 @app.route('/status')
 def status():
+    current_time = time.time()
     with boost_lock:
-        current_time = time.time()
         is_active = boost_state['active'] and current_time < boost_state['expire_time']
         boost_info = {
             'boost_active': is_active,
@@ -343,6 +349,11 @@ def status():
             'normal_interval': NORMAL_INTERVAL,
             'boost_interval': BOOST_INTERVAL,
         }
+    # 计算实际频率：最近60秒内的调用次数
+    recent_fetches = [t for t in stats['fetch_times'] if current_time - t < 60]
+    fetch_count_60s = len(recent_fetches)
+    # 计算每秒频率
+    fetch_per_second = fetch_count_60s / 60.0 if fetch_count_60s > 0 else 0
     return jsonify({
         'service': 'token_service',
         'port': config.TOKEN_PORT,
@@ -351,6 +362,8 @@ def status():
         'last_fetch': stats['last_fetch'],
         'last_success': stats['last_success'],
         'errors': stats['errors'],
+        'fetch_count_60s': fetch_count_60s,
+        'fetch_per_second': round(fetch_per_second, 2),
         **boost_info
     })
 

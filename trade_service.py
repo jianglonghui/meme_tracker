@@ -54,6 +54,8 @@ stats = {
     'errors': 0,
     'last_signal': None,
     'last_trade': None,
+    'api_call_times': [],  # 最近60秒的API调用时间戳
+    'api_calls_by_token': {},  # 按代币地址记录: {address: [时间戳列表]}
 }
 
 # 持仓数据: {position_id: {...}}
@@ -632,7 +634,17 @@ def monitor_positions():
             for pos in active_positions:
                 try:
                     # 查询当前市值
-                    data = get_token_mcap(pos['address'])
+                    addr = pos['address']
+                    data = get_token_mcap(addr)
+                    # 记录API调用时间（总计和按代币）
+                    now = time.time()
+                    stats['api_call_times'].append(now)
+                    stats['api_call_times'] = [t for t in stats['api_call_times'] if now - t < 60]
+                    # 按代币记录
+                    if addr not in stats['api_calls_by_token']:
+                        stats['api_calls_by_token'][addr] = []
+                    stats['api_calls_by_token'][addr].append(now)
+                    stats['api_calls_by_token'][addr] = [t for t in stats['api_calls_by_token'][addr] if now - t < 60]
                     if not data:
                         continue
 
@@ -743,6 +755,11 @@ def status():
     with positions_lock:
         active_count = sum(1 for p in positions.values() if p['status'] == 'holding')
 
+    # 计算API调用频率
+    now = time.time()
+    recent_calls = [t for t in stats['api_call_times'] if now - t < 60]
+    api_call_count_60s = len(recent_calls)
+
     return jsonify({
         'service': 'trade_service',
         'port': config.get_port('trade'),
@@ -755,6 +772,7 @@ def status():
         'errors': stats['errors'],
         'last_signal': stats['last_signal'],
         'last_trade': stats['last_trade'],
+        'api_call_count_60s': api_call_count_60s,
     })
 
 
@@ -909,12 +927,18 @@ def receive_signal():
 @app.route('/positions', methods=['GET'])
 def get_positions():
     """获取当前持仓"""
+    now = time.time()
     with positions_lock:
         pos_list = []
         for p in positions.values():
             buy_mcap = p.get('buy_mcap', 0)
             current_mcap = p.get('current_mcap', 0)
             change_pct = ((current_mcap - buy_mcap) / buy_mcap * 100) if buy_mcap > 0 else 0
+
+            # 计算该代币的API调用频率
+            addr = p['address']
+            token_calls = stats['api_calls_by_token'].get(addr, [])
+            api_call_count = len([t for t in token_calls if now - t < 60])
 
             pos_list.append({
                 'id': p['id'],
@@ -934,6 +958,7 @@ def get_positions():
                 'created_at': p.get('created_at', 0),
                 'updated_at': p.get('updated_at', 0),
                 'mcap_history': p.get('mcap_history', []),
+                'api_call_count_60s': api_call_count,
             })
 
         # 按创建时间倒序
