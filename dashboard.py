@@ -1145,8 +1145,11 @@ HTML_TEMPLATE = """
                                 <div class="stat-item">错误: <span class="stat-value ${hasErrors?'error':''}">${d.errors || 0}</span></div>
                                 <div class="stat-item"><button onclick="openAuthorWhitelistModal()" style="${whitelistBtnStyle};border:none;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:11px">管理白名单</button></div>`;
                 } else if (s.name === 'token_service') {
+                    const boostActive = d.boost_active;
+                    const boostStyle = boostActive ? 'color:#f0b90b;font-weight:bold' : 'color:#848e9c';
+                    const boostText = boostActive ? `⚡高频 (${Math.ceil(d.boost_remaining || 0)}s)` : '普通';
                     statsHtml = `<div class="stat-item">代币: <span class="stat-value">${d.total_tokens || 0}</span></div>
-                                <div class="stat-item">最后获取: <span class="stat-value" id="token_service-last-fetch">${formatTime(d.last_fetch)}</span></div>
+                                <div class="stat-item">模式: <span class="stat-value" style="${boostStyle}">${boostText}</span></div>
                                 <div class="stat-item">最后成功: <span class="stat-value" id="token_service-last-success">${formatTime(d.last_success)}</span></div>
                                 <div class="stat-item">错误: <span class="stat-value ${hasErrors?'error':''}">${d.errors || 0}</span></div>`;
                 } else if (s.name === 'match_service') {
