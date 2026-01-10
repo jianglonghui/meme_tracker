@@ -20,6 +20,7 @@ app = Flask(__name__)
 # ==================== 配置 ====================
 WHITELIST_AUTHORS_FILE = os.path.join(os.path.dirname(__file__), 'trade_author_whitelist.json')
 WHITELIST_TOKENS_FILE = os.path.join(os.path.dirname(__file__), 'trade_token_whitelist.json')
+CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'trade_config.json')
 DB_PATH = os.path.join(os.path.dirname(__file__), 'trade.db')
 
 # 默认配置
@@ -248,6 +249,34 @@ def log_trade(position_id, action, token_symbol, address, amount, price, mcap, r
 
     # 保存到数据库
     save_trade_to_db(trade_record)
+
+
+# ==================== 配置持久化 ====================
+
+def load_config():
+    """从文件加载配置"""
+    global runtime_config
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                saved_config = json.load(f)
+            # 合并配置：以默认配置为基础，用保存的配置覆盖
+            for key in DEFAULT_CONFIG:
+                if key in saved_config:
+                    runtime_config[key] = saved_config[key]
+            print(f"[Trade] 已加载配置: {CONFIG_FILE}", flush=True)
+        except Exception as e:
+            print(f"[Trade] 加载配置失败: {e}", flush=True)
+
+
+def save_config():
+    """保存配置到文件"""
+    try:
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(runtime_config, f, ensure_ascii=False, indent=2)
+        print(f"[Trade] 配置已保存", flush=True)
+    except Exception as e:
+        print(f"[Trade] 保存配置失败: {e}", flush=True)
 
 
 # ==================== 白名单管理 ====================
@@ -958,6 +987,9 @@ def handle_config():
         if key in data:
             runtime_config[key] = data[key]
 
+    # 持久化配置到文件
+    save_config()
+
     print(f"[Trade] 配置已更新: {data}", flush=True)
     return jsonify({'success': True, 'config': runtime_config})
 
@@ -1082,6 +1114,9 @@ def run():
 
     # 初始化数据库
     init_db()
+
+    # 加载配置
+    load_config()
 
     # 从数据库加载数据
     load_positions_from_db()
