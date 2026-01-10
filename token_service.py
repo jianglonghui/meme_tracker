@@ -7,6 +7,7 @@ import requests
 import time
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, Response, jsonify
 import config
 
@@ -200,12 +201,41 @@ def fetch_tokens_for_chain(chain):
     return None
 
 
-def fetch_tokens():
-    """获取所有链的代币"""
-    all_success = True
+def is_boost_active():
+    """检查是否处于高频模式"""
+    with boost_lock:
+        return boost_state['active'] and time.time() < boost_state['expire_time']
 
-    # 1. 获取 BSC 代币 (Binance API)
-    bsc_data = fetch_tokens_for_chain(BSC_CHAIN)
+
+def fetch_tokens():
+    """获取所有链的代币（并行请求，高频模式只请求BSC）"""
+    all_success = True
+    results = {}
+    boost_mode = is_boost_active()
+
+    def fetch_bsc():
+        """获取 BSC 代币"""
+        return ('BSC', fetch_tokens_for_chain(BSC_CHAIN))
+
+    def fetch_sol():
+        """获取 Solana 代币"""
+        return ('SOL', fetch_solana_tokens())
+
+    # 高频模式只请求 BSC，普通模式并行请求所有链
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(fetch_bsc)]
+        if not boost_mode:
+            futures.append(executor.submit(fetch_sol))
+
+        for future in as_completed(futures):
+            try:
+                chain, data = future.result()
+                results[chain] = data
+            except Exception as e:
+                print(f"[Token] 并行获取异常: {e}", flush=True)
+
+    # 处理 BSC 结果
+    bsc_data = results.get('BSC')
     if bsc_data:
         new_items, _ = process_tokens(bsc_data, 'BSC')
         if new_items:
@@ -216,15 +246,16 @@ def fetch_tokens():
     else:
         all_success = False
 
-    # 2. 获取 Solana 代币 (DexScreener API)
-    sol_tokens = fetch_solana_tokens()
-    if sol_tokens:
-        new_items, _ = process_solana_tokens(sol_tokens)
-        if new_items:
-            stats['total_tokens'] += len(new_items)
-            for item in new_items:
-                symbol = item.get('symbol', 'Unknown')
-                print(f"[新币] [SOL] {symbol}", flush=True)
+    # 处理 Solana 结果（仅普通模式）
+    if not boost_mode:
+        sol_tokens = results.get('SOL')
+        if sol_tokens:
+            new_items, _ = process_solana_tokens(sol_tokens)
+            if new_items:
+                stats['total_tokens'] += len(new_items)
+                for item in new_items:
+                    symbol = item.get('symbol', 'Unknown')
+                    print(f"[新币] [SOL] {symbol}", flush=True)
 
     if all_success:
         stats['last_success'] = time.time()
@@ -552,6 +583,12 @@ def alpha():
 if __name__ == "__main__":
     port = config.get_port('token')
     print(f"代币发现服务启动: http://127.0.0.1:{port}", flush=True)
+
+    # 启动前先获取一次代币，避免启动后等待
+    print("正在获取初始代币数据...", flush=True)
+    fetch_tokens()
+    stats['last_fetch'] = time.time()
+    print(f"初始代币获取完成，共 {stats['total_tokens']} 个", flush=True)
 
     fetcher_thread = threading.Thread(target=token_fetcher, daemon=True)
     fetcher_thread.start()

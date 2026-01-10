@@ -7,6 +7,7 @@ import requests
 import time
 import hashlib
 import os
+import json
 from collections import deque
 from flask import Flask, render_template_string, jsonify, request, Response, send_file
 import config
@@ -571,7 +572,7 @@ HTML_TEMPLATE = """
             </div>
         </div>
 
-        <div class="refresh-info">每 5 秒自动刷新 | <span id="last-update">-</span></div>
+        <div class="refresh-info">🔴 实时更新 | <span id="last-update">-</span></div>
     </div>
 
     <script>
@@ -1148,12 +1149,14 @@ HTML_TEMPLATE = """
                     const boostActive = d.boost_active;
                     const boostStyle = boostActive ? 'color:#f0b90b;font-weight:bold' : 'color:#848e9c';
                     const boostText = boostActive ? `⚡高频 (${Math.ceil(d.boost_remaining || 0)}s)` : '普通';
+                    const boostBtnStyle = boostActive ? 'background:#f0b90b;color:#000' : 'background:#363c45;color:#eaecef';
                     const freqText = `${d.fetch_count_60s || 0}次/分`;
                     statsHtml = `<div class="stat-item">代币: <span class="stat-value">${d.total_tokens || 0}</span></div>
                                 <div class="stat-item">模式: <span class="stat-value" style="${boostStyle}">${boostText}</span></div>
                                 <div class="stat-item">频率: <span class="stat-value">${freqText}</span></div>
                                 <div class="stat-item">最后成功: <span class="stat-value" id="token_service-last-success">${formatTime(d.last_success)}</span></div>
-                                <div class="stat-item">错误: <span class="stat-value ${hasErrors?'error':''}">${d.errors || 0}</span></div>`;
+                                <div class="stat-item">错误: <span class="stat-value ${hasErrors?'error':''}">${d.errors || 0}</span></div>
+                                <div class="stat-item"><button onclick="triggerBoostMode()" style="${boostBtnStyle};border:none;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:11px">⚡高频</button></div>`;
                 } else if (s.name === 'match_service') {
                     const hardcodedEnabled = d.enable_hardcoded_match !== false;
                     const toggleColor = hardcodedEnabled ? '#0ecb81' : '#848e9c';
@@ -2163,6 +2166,23 @@ HTML_TEMPLATE = """
             }
         }
 
+        // 手动触发高频模式
+        async function triggerBoostMode() {
+            try {
+                const resp = await fetch('api/token/boost', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({author: 'manual'})
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    console.log('高频模式已激活');
+                }
+            } catch (e) {
+                console.error('触发高频模式失败:', e);
+            }
+        }
+
         function openBlacklistModal() {
             document.getElementById('blacklistModal').style.display = 'flex';
             document.getElementById('blacklistInput').value = '';
@@ -2990,8 +3010,55 @@ HTML_TEMPLATE = """
             }
         }
 
+        // 初始加载
         refresh();
-        setInterval(refresh, 5000);
+
+        // SSE 实时更新
+        let eventSource = null;
+        function connectSSE() {
+            if (eventSource) {
+                eventSource.close();
+            }
+            eventSource = new EventSource('api/sse');
+            eventSource.onmessage = function(e) {
+                try {
+                    const data = JSON.parse(e.data);
+                    if (data.services) {
+                        // 保存滚动位置
+                        const scrollPositions = {};
+                        document.querySelectorAll('.data-list').forEach((el, i) => {
+                            scrollPositions[i] = el.scrollTop;
+                        });
+
+                        renderServices(data.services, data.monitoring || {count: 0, contracts: []});
+
+                        // 恢复滚动位置
+                        document.querySelectorAll('.data-list').forEach((el, i) => {
+                            if (scrollPositions[i]) el.scrollTop = scrollPositions[i];
+                        });
+
+                        document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+                    }
+                } catch (err) {
+                    console.error('SSE parse error:', err);
+                }
+            };
+            eventSource.onerror = function() {
+                console.warn('SSE connection error, reconnecting in 3s...');
+                eventSource.close();
+                setTimeout(connectSSE, 3000);
+            };
+        }
+        connectSSE();
+
+        // 匹配数据仍用轮询（更新较少）
+        setInterval(async () => {
+            try {
+                const matchResp = await fetch('api/matches');
+                const matchData = await matchResp.json();
+                renderMatches(matchData);
+            } catch (e) {}
+        }, 5000);
     </script>
 </body>
 </html>
@@ -3025,6 +3092,55 @@ def get_recent_data(service):
     except:
         pass
     return None
+
+
+@app.route('/api/sse')
+def api_sse():
+    """SSE 实时推送服务状态"""
+    def generate():
+        while True:
+            try:
+                # 获取服务状态
+                results = []
+                for service in get_services():
+                    status = get_service_status(service)
+                    recent = get_recent_data(service)
+                    name = service['name']
+                    current_errors = status['data'].get('errors', 0) if status['data'] else 0
+                    has_new_error = current_errors > last_errors[name]
+                    last_errors[name] = current_errors
+                    status_history[name].append(not has_new_error)
+                    history = list(status_history[name])
+                    results.append({
+                        'name': name,
+                        'desc': service['desc'],
+                        'port': service['port'],
+                        'status': status['status'],
+                        'data': status['data'],
+                        'recent': recent,
+                        'history': history
+                    })
+
+                # 获取监测数据
+                monitoring_data = {'count': 0, 'contracts': []}
+                try:
+                    resp = requests.get(f"{config.get_service_url('alpha')}/monitoring", timeout=2, proxies={'http': None, 'https': None})
+                    if resp.status_code == 200:
+                        monitoring_data = resp.json()
+                except:
+                    pass
+
+                data = json.dumps({'services': results, 'monitoring': monitoring_data})
+                yield f"data: {data}\n\n"
+            except Exception as e:
+                yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            time.sleep(1)  # 每秒推送一次
+
+    return Response(generate(), mimetype='text/event-stream', headers={
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no'
+    })
 
 
 @app.route('/api/status')
@@ -3544,6 +3660,25 @@ def api_whitelist_news():
 
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ==================== Token 服务 API ====================
+
+@app.route('/api/token/boost', methods=['POST'])
+def api_token_boost():
+    """手动触发高频模式"""
+    try:
+        resp = requests.post(
+            f'{config.get_service_url("token")}/boost',
+            json=request.json or {'author': 'manual'},
+            timeout=5,
+            proxies={'http': None, 'https': None}
+        )
+        if resp.status_code == 200:
+            return jsonify(resp.json())
+        return jsonify({'error': 'Service unavailable'}), 500
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 # ==================== 交易服务 API ====================
