@@ -71,6 +71,30 @@ def is_author_allowed(author):
         return author.lower() in author_whitelist
 
 
+def is_author_in_whitelist(author):
+    """检查作者是否在白名单中（不考虑开关状态）"""
+    with whitelist_lock:
+        return author.lower() in author_whitelist
+
+
+def trigger_token_boost(author):
+    """触发 token_service 的高频模式"""
+    try:
+        resp = requests.post(
+            f"{config.get_service_url('token')}/boost",
+            json={'author': author},
+            timeout=2,
+            proxies={'http': None, 'https': None}
+        )
+        if resp.status_code == 200:
+            result = resp.json()
+            print(f"[智能调频] 已触发高频模式 (作者: @{author})", flush=True)
+            return True
+    except Exception as e:
+        print(f"[智能调频] 触发失败: {e}", flush=True)
+    return False
+
+
 # 启动时加载白名单
 load_whitelist()
 
@@ -155,6 +179,10 @@ def news_fetcher():
                     news_list.append(item)
                     stats['total_news'] += 1
                     print(f"[推文] @{author} - {item.get('eventType', '')}", flush=True)
+
+                    # 智能调频：检测到白名单作者推文时触发高频模式
+                    if is_author_in_whitelist(author):
+                        trigger_token_boost(author)
         time.sleep(1)
 
 

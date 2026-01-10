@@ -21,6 +21,22 @@ stats = {
     'errors': 0
 }
 
+# ==================== 智能调频配置 ====================
+# 普通模式：每 5 秒请求一次
+# 高频模式：每 1 秒请求一次（白名单作者发推文时触发）
+NORMAL_INTERVAL = 5  # 普通模式间隔（秒）
+BOOST_INTERVAL = 1   # 高频模式间隔（秒）
+BOOST_DURATION = 60  # 高频模式持续时间（秒）
+
+# 调频状态
+boost_state = {
+    'active': False,           # 是否处于高频模式
+    'expire_time': 0,          # 高频模式过期时间
+    'trigger_author': None,    # 触发高频的作者
+    'trigger_time': None,      # 触发时间
+}
+boost_lock = threading.Lock()
+
 # 代币字典 (key: tokenAddress, value: token data)
 token_dict = {}
 token_lock = threading.Lock()
@@ -38,6 +54,48 @@ def log_error(msg):
         if len(error_log) > MAX_ERRORS:
             error_log.pop(0)
     stats['errors'] += 1
+
+
+def get_current_interval():
+    """获取当前的请求间隔（基于是否处于高频模式）"""
+    with boost_lock:
+        if boost_state['active']:
+            current_time = time.time()
+            if current_time < boost_state['expire_time']:
+                return BOOST_INTERVAL
+            else:
+                # 高频模式过期，自动恢复普通模式
+                boost_state['active'] = False
+                boost_state['expire_time'] = 0
+                author = boost_state['trigger_author'] or 'unknown'
+                print(f"[智能调频] 高频模式结束，恢复普通模式 (触发者: @{author})", flush=True)
+        return NORMAL_INTERVAL
+
+
+def activate_boost_mode(author=None):
+    """激活高频模式"""
+    with boost_lock:
+        current_time = time.time()
+        was_active = boost_state['active'] and current_time < boost_state['expire_time']
+
+        boost_state['active'] = True
+        boost_state['expire_time'] = current_time + BOOST_DURATION
+        boost_state['trigger_author'] = author
+        boost_state['trigger_time'] = current_time
+
+        if was_active:
+            print(f"[智能调频] 高频模式延长至 {BOOST_DURATION} 秒 (触发者: @{author or 'unknown'})", flush=True)
+        else:
+            print(f"[智能调频] 激活高频模式 {BOOST_DURATION} 秒 (触发者: @{author or 'unknown'})", flush=True)
+
+        return {
+            'success': True,
+            'mode': 'boost',
+            'interval': BOOST_INTERVAL,
+            'duration': BOOST_DURATION,
+            'expire_time': boost_state['expire_time'],
+            'trigger_author': author
+        }
 
 # BSC 链配置 (Binance API)
 BSC_CHAIN = {"chainId": "56", "name": "BSC", "protocol": [2001]}
@@ -231,10 +289,12 @@ def process_tokens(data, chain_name='BSC'):
 
 def token_fetcher():
     print("开始获取新币...", flush=True)
+    print(f"[智能调频] 普通模式: {NORMAL_INTERVAL}秒/次, 高频模式: {BOOST_INTERVAL}秒/次", flush=True)
     while stats['running']:
         fetch_tokens()
         stats['last_fetch'] = time.time()
-        time.sleep(1)
+        interval = get_current_interval()
+        time.sleep(interval)
 
 
 @app.route('/stream')
@@ -271,6 +331,16 @@ def stream():
 
 @app.route('/status')
 def status():
+    with boost_lock:
+        boost_info = {
+            'boost_active': boost_state['active'] and time.time() < boost_state['expire_time'],
+            'boost_expire_time': boost_state['expire_time'] if boost_state['active'] else None,
+            'boost_remaining': max(0, boost_state['expire_time'] - time.time()) if boost_state['active'] else 0,
+            'boost_trigger_author': boost_state['trigger_author'],
+            'current_interval': get_current_interval(),
+            'normal_interval': NORMAL_INTERVAL,
+            'boost_interval': BOOST_INTERVAL,
+        }
     return jsonify({
         'service': 'token_service',
         'port': config.TOKEN_PORT,
@@ -278,8 +348,35 @@ def status():
         'total_tokens': stats['total_tokens'],
         'last_fetch': stats['last_fetch'],
         'last_success': stats['last_success'],
-        'errors': stats['errors']
+        'errors': stats['errors'],
+        **boost_info
     })
+
+
+@app.route('/boost', methods=['POST'])
+def boost():
+    """触发高频模式（被 news_service 调用）"""
+    from flask import request
+    data = request.json or {}
+    author = data.get('author', '')
+    result = activate_boost_mode(author)
+    return jsonify(result)
+
+
+@app.route('/boost/status', methods=['GET'])
+def boost_status():
+    """获取高频模式状态"""
+    with boost_lock:
+        current_time = time.time()
+        is_active = boost_state['active'] and current_time < boost_state['expire_time']
+        return jsonify({
+            'active': is_active,
+            'current_interval': get_current_interval(),
+            'expire_time': boost_state['expire_time'] if is_active else None,
+            'remaining_seconds': max(0, boost_state['expire_time'] - current_time) if is_active else 0,
+            'trigger_author': boost_state['trigger_author'] if is_active else None,
+            'trigger_time': boost_state['trigger_time'] if is_active else None,
+        })
 
 
 @app.route('/recent')
