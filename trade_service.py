@@ -745,12 +745,11 @@ def receive_signal():
             })
             continue
 
-        # 检查代币名称长度（少于5个汉字或3个单词）
-        token_name = token.get('token_name', '') or token.get('name', '') or ''
-        name_valid, name_reason = is_token_name_valid(token_name)
+        # 检查代币符号长度（少于5个汉字或3个单词）
+        name_valid, name_reason = is_token_name_valid(symbol)
         if not name_valid:
-            filter_reason = f'名称过滤: {name_reason}'
-            print(f"[Trade] 过滤 {symbol} ({token_name}): {filter_reason}", flush=True)
+            filter_reason = f'符号过滤: {name_reason}'
+            print(f"[Trade] 过滤 {symbol}: {filter_reason}", flush=True)
 
             # 记录到交易日志
             log_trade(
@@ -761,7 +760,7 @@ def receive_signal():
                 amount=0,
                 price=token.get('price', '0'),
                 mcap=float(token.get('market_cap', 0) or token.get('marketCap', 0) or 0),
-                response={'filtered': True, 'name': token_name},
+                response={'filtered': True, 'symbol': symbol},
                 reason=filter_reason
             )
 
