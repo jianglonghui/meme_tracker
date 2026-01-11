@@ -3,7 +3,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 import config
 from .matchers import run_hardcoded_engine, run_ai_engine, run_ai_fast_engine
-from .state import log_match, log_error, stats
+from .state import log_match, log_error, stats, update_attempt_task
 
 class NewsSession:
     """代表一条推文的匹配会话，负责在时间窗口内监控新代币"""
@@ -66,6 +66,7 @@ class NewsSession:
         # 1. 硬编码引擎 (同步执行)
         if stats.get('enable_hardcoded_match', True):
             hard_matches = run_hardcoded_engine(self.content, tokens, self.local_cache, source)
+            task_name = f"{source}_hardcoded"
             if hard_matches:
                 current_time_ms = int(time.time() * 1000)
                 with self.lock:
@@ -74,6 +75,12 @@ class NewsSession:
                         m['_system_latency'] = current_time_ms - (self.news_time * 1000)
                         self.matched_token_ids.add(m.get('tokenAddress'))
                 matched_results.extend(hard_matches)
+                
+                # 更新状态
+                result_str = ",".join([m.get('tokenSymbol') or m.get('symbol', '') for m in hard_matches])
+                update_attempt_task(self.content, task_name, 'success', result_str)
+            else:
+                update_attempt_task(self.content, task_name, 'no_match')
         
         return matched_results
 
@@ -85,6 +92,9 @@ class NewsSession:
 
         if not remaining: return []
 
+        task_name = f"{source}_ai"
+        update_attempt_task(self.content, task_name, 'running')
+        
         ai_matches = run_ai_engine(self.content, remaining, self.images, self.local_cache, source)
         if ai_matches:
             current_time_ms = int(time.time() * 1000)
@@ -96,16 +106,25 @@ class NewsSession:
                         m['_system_latency'] = current_time_ms - (self.news_time * 1000)
                         self.matched_token_ids.add(token_addr)
                         new_matches.append(m)
+            
+            # 更新状态
+            result_str = ",".join([m.get('tokenSymbol') or m.get('symbol', '') for m in ai_matches])
+            update_attempt_task(self.content, task_name, 'success', result_str)
             return new_matches
+            
+        update_attempt_task(self.content, task_name, 'no_match')
         return []
 
     def execute_ai_fast_engine_async(self, tokens, source='new'):
-        """后台执行 DeepSeek 快速 AI 引擎"""
+        """后台执行 Cerebras 快速 AI 引擎"""
         # 过滤掉已经匹配过的
         with self.lock:
             remaining = [t for t in tokens if t.get('tokenAddress') not in self.matched_token_ids]
 
         if not remaining: return []
+
+        task_name = f"{source}_ai_fast"
+        update_attempt_task(self.content, task_name, 'running')
 
         ai_fast_matches = run_ai_fast_engine(self.content, remaining, self.local_cache, source)
         if ai_fast_matches:
@@ -118,7 +137,13 @@ class NewsSession:
                         m['_system_latency'] = current_time_ms - (self.news_time * 1000)
                         self.matched_token_ids.add(token_addr)
                         new_matches.append(m)
+            
+            # 更新状态
+            result_str = ",".join([m.get('tokenSymbol') or m.get('symbol', '') for m in ai_fast_matches])
+            update_attempt_task(self.content, task_name, 'success', result_str)
             return new_matches
+            
+        update_attempt_task(self.content, task_name, 'no_match')
         return []
 
 class MatchOrchestrator:
@@ -162,7 +187,7 @@ class MatchOrchestrator:
             if initial_old_matches:
                 self.send_callback(news_data, [], initial_old_matches)
 
-            # 2.2 AI 快速引擎 (异步)
+            # 2.2 Cerebras AI 快速引擎 (异步)
             if stats.get('enable_ai_fast_match', True):
                 self.executor.submit(self._run_ai_fast_task, session, exclusive_tokens, source='exclusive')
 
@@ -209,11 +234,11 @@ class MatchOrchestrator:
             log_error(f"Orchestrator AI Task: {e}")
 
     def _run_ai_fast_task(self, session, tokens, source='new'):
-        """DeepSeek 快速 AI 任务执行逻辑"""
+        """Cerebras 快速 AI 任务执行逻辑"""
         try:
             ai_fast_matches = session.execute_ai_fast_engine_async(tokens, source)
             if ai_fast_matches:
-                print(f"[DeepSeek Fast] 匹配到 {len(ai_fast_matches)} 个代币", flush=True)
+                print(f"[Cerebras] 匹配到 {len(ai_fast_matches)} 个代币", flush=True)
                 self.send_callback(session.news_data, [], ai_fast_matches)
         except Exception as e:
             log_error(f"Orchestrator AI Fast Task: {e}")

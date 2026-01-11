@@ -88,9 +88,11 @@ def log_attempt(author, content, keywords, tokens_in_window, matched_count, wind
             'window_tokens': window_token_names[:5] if window_token_names else [],
             'match_tasks': {
                 'new_hardcoded': {'status': 'pending', 'result': None},
-                'new_ai': {'status': 'pending', 'result': None},
+                'new_ai_fast': {'status': 'pending', 'result': None},  # Cerebras
+                'new_ai': {'status': 'pending', 'result': None},       # Gemini
                 'exclusive_hardcoded': {'status': 'pending', 'result': None},
-                'exclusive_ai': {'status': 'pending', 'result': None}
+                'exclusive_ai_fast': {'status': 'pending', 'result': None}, # Cerebras
+                'exclusive_ai': {'status': 'pending', 'result': None}       # Gemini
             },
             'matched_tokens': []
         })
@@ -117,8 +119,10 @@ def update_attempt_task(content, task_type, status, result=None, matched_token=N
                 if 'match_tasks' not in attempt:
                     attempt['match_tasks'] = {
                         'new_hardcoded': {'status': 'pending', 'result': None},
+                        'new_ai_fast': {'status': 'pending', 'result': None},
                         'new_ai': {'status': 'pending', 'result': None},
                         'exclusive_hardcoded': {'status': 'pending', 'result': None},
+                        'exclusive_ai_fast': {'status': 'pending', 'result': None},
                         'exclusive_ai': {'status': 'pending', 'result': None}
                     }
                 if 'matched_tokens' not in attempt:

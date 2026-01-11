@@ -17,7 +17,7 @@ from .state import (
 )
 from .blacklist import load_exclusive_blacklist
 from .utils import match_name_in_tweet, get_cached_image
-from .ai_clients import call_gemini_judge, call_deepseek_fast_judge
+from .ai_clients import call_gemini_judge, call_cerebras_fast_judge
 
 MIN_MATCH_SCORE = 2.0
 
@@ -261,12 +261,10 @@ def run_ai_engine(tweet_text, tokens, image_urls=None, local_cache=None, source=
     except Exception as e:
         print(f"[AI Engine] 异常: {e}", flush=True)
         
-    return []
-
-
+# 执行 AI 快速匹配（Cerebras gpt-oss-120b，无图片，中英文语义匹配）
 def run_ai_fast_engine(tweet_text, tokens, local_cache=None, source='new'):
-    """执行 AI 快速匹配（DeepSeek chat，无图片，中英文语义匹配）"""
-    if not tokens or not config.DEEPSEEK_API_KEY:
+    """执行 AI 快速匹配（Cerebras gpt-oss-120b，无图片，中英文语义匹配）"""
+    if not tokens or not config.CEREBRAS_API_KEY:
         return []
 
     # 转换格式供 AI 使用
@@ -277,7 +275,8 @@ def run_ai_fast_engine(tweet_text, tokens, local_cache=None, source='new'):
     ]
 
     try:
-        matched_indices = call_deepseek_fast_judge(tweet_text, tokens_for_ai)
+        # 调用 Cerebras 快速匹配
+        matched_indices = call_cerebras_fast_judge(tweet_text, tokens_for_ai)
         if not matched_indices:
             return []
 

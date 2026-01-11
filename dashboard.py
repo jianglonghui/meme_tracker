@@ -1768,8 +1768,10 @@ HTML_TEMPLATE = """
                                 };
                                 const taskNames = {
                                     'new_hardcoded': '新币⚡',
+                                    'new_ai_fast': '新币🦾',
                                     'new_ai': '新币🤖',
                                     'exclusive_hardcoded': '优质⚡',
+                                    'exclusive_ai_fast': '优质🦾',
                                     'exclusive_ai': '优质🤖'
                                 };
                                 let tasksHtml = Object.entries(tasks).map(([key, val]) => {
@@ -1784,7 +1786,7 @@ HTML_TEMPLATE = """
                                 let tokensHtml = '';
                                 if (matchedTokens.length > 0) {
                                     tokensHtml = `<div style="margin-top:4px;font-size:10px">🎯 匹配: ${matchedTokens.map(t => {
-                                        const methodIcon = t.method === 'ai' ? '🤖' : '⚡';
+                                        const methodIcon = t.method === 'ai' ? '🤖' : (t.method === 'ai_fast' ? '🦾' : '⚡');
                                         const sourceIcon = t.source === 'exclusive' ? '📦' : '🆕';
                                         return `<span style="color:#0ecb81;margin-right:6px">${t.symbol} ${methodIcon}${sourceIcon} M:${t.time_cost || 0}ms S:${t.system_latency || 0}ms</span>`;
                                     }).join('')}</div>`;
@@ -1814,7 +1816,7 @@ HTML_TEMPLATE = """
                                     // 兼容新旧格式：tokens 可能是 [{symbol, time_cost, method, source}] 或 ['symbol']
                                     const tokenInfo = r.tokens.map(t => {
                                         if (typeof t === 'string') return t;
-                                        const method = t.method === 'ai' ? '🤖' : '⚡';
+                                        const method = t.method === 'ai' ? '🤖' : (t.method === 'ai_fast' ? '🦾' : '⚡');
                                         const source = t.source === 'exclusive' ? '📦' : '🆕';
                                         return `${t.symbol} <span style="color:#848e9c;font-size:10px">${method} M:${t.time_cost}ms S:${t.system_latency || 0}ms ${source}</span>`;
                                     }).join(', ');

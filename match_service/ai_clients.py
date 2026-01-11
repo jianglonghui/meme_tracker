@@ -208,7 +208,7 @@ def call_gemini(news_content, image_paths=None):
 
         response = client.models.generate_content(
             model="gemini-3-flash-preview",
-            contents=contents,
+            contents=contents
         )
 
         keywords = parse_json_response(response.text.strip(), "Gemini")
@@ -287,7 +287,7 @@ def call_gemini_judge(tweet_text, tokens, image_paths=None):
         start = time.time()
         response = client.models.generate_content(
             model="gemini-3-flash-preview",
-            contents=contents,
+            contents=contents
         )
 
         result = response.text.strip().lower()
@@ -314,64 +314,56 @@ def call_gemini_judge(tweet_text, tokens, image_paths=None):
     return -1
 
 
-def call_deepseek_fast_judge(tweet_text, tokens):
-    """调用 DeepSeek chat 模型快速判断推文与代币的关联
+def call_cerebras_fast_judge(tweet_text, tokens):
+    """调用 Cerebras 快速判断推文与代币的关联
 
     特点：
-    - 使用 deepseek-chat（非 reason 模型），速度快
-    - 强调中英文翻译、谐音、缩写匹配
-    - 不支持图片，纯文本匹配
-
-    Args:
-        tweet_text: 推文内容
-        tokens: 代币列表 [{'symbol': '', 'name': ''}, ...]
-
-    Returns:
-        匹配的代币索引列表（0-based），无匹配返回空列表
+    - 使用 gpt-oss-120b，推理速度极快
+    - 针对中英文翻译、语义匹配优化
     """
-    if not config.DEEPSEEK_API_KEY or not tokens:
+    if not hasattr(config, 'CEREBRAS_API_KEY') or not config.CEREBRAS_API_KEY or not tokens:
         return []
 
     token_list_str = [f"{i+1}. symbol:{t['symbol']} name:{t['name']}" for i, t in enumerate(tokens)]
     token_str = "\n".join(token_list_str)
 
-    prompt = f"""判断推文是否提及以下代币列表中的代币。
+    prompt = f"""判断以下推文是否在提及代币列表中的某个代币。
 
-推文: {tweet_text}
+推文内容: {tweet_text}
 
 代币列表:
 {token_str}
 
-匹配规则（重要）:
-- 翻译匹配：中文词 ↔ 英文词（如 "狗狗" ↔ "DOGE"，"青蛙" ↔ "PEPE"，"牛" ↔ "BULL"）
-- 谐音匹配：发音相似（如 "踏马" ↔ "TM"，"韭菜" ↔ "JC"）
-- 缩写匹配：首字母或简写（如 "我踏马" ↔ "WTM"）
-- 语义匹配：含义相关（如 "牛市" ↔ "BULL"，"起飞" ↔ "MOON"）
-- 包含匹配：推文包含代币名或符号
+规则:
+- 推文的单词需要与代币的 symbol 或 name 有关联（包含、谐音、缩写、翻译等）
+- 如果有匹配，返回代币序号
+- 如果多个匹配，返回所有匹配的序号，用逗号分隔
+- 如果没有任何匹配，返回 none
 
-返回格式：
-- 如果有匹配，返回所有匹配的代币序号，用逗号分隔（如 "1,3,5"）
-- 如果没有匹配，返回 "none"
-
-只返回序号或 "none"："""
+只返回序号或 "none"，不要其他内容："""
 
     start = time.time()
     try:
         headers = {
-            "Authorization": f"Bearer {config.DEEPSEEK_API_KEY}",
+            "Authorization": f"Bearer {config.CEREBRAS_API_KEY}",
             "Content-Type": "application/json"
         }
         payload = {
-            "model": "deepseek-chat",  # 非 reason 模型，速度快
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 32
+            "model": "gpt-oss-120b",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "temperature": 0
         }
-        resp = requests.post(config.DEEPSEEK_API_URL, headers=headers, json=payload, timeout=10)
+        resp = requests.post(config.CEREBRAS_API_URL, headers=headers, json=payload, timeout=10)
         if resp.status_code == 200:
             result = resp.json()['choices'][0]['message']['content'].strip().lower()
 
             if result == 'none' or not result:
-                print(f"[DeepSeek Fast] OK {time.time()-start:.1f}s -> 无匹配", flush=True)
+                print(f"[Cerebras] OK {time.time()-start:.1f}s -> 无匹配", flush=True)
                 return []
 
             # 解析返回的序号列表
@@ -385,12 +377,12 @@ def call_deepseek_fast_judge(tweet_text, tokens):
                     continue
 
             matched_symbols = [tokens[i].get('symbol', '') for i in matched_indices]
-            print(f"[DeepSeek Fast] OK {time.time()-start:.1f}s -> {matched_symbols}", flush=True)
+            print(f"[Cerebras] OK {time.time()-start:.1f}s -> {matched_symbols}", flush=True)
             return matched_indices
-        print(f"[DeepSeek Fast] HTTP {resp.status_code}", flush=True)
+        print(f"[Cerebras] HTTP {resp.status_code}", flush=True)
     except Exception as e:
-        log_error(f"DeepSeek Fast Judge: {e}")
-        print(f"[DeepSeek Fast] 失败: {e}", flush=True)
+        log_error(f"Cerebras Fast Judge: {e}")
+        print(f"[Cerebras] 失败: {e}", flush=True)
     return []
 
 
