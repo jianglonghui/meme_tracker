@@ -52,9 +52,9 @@ def refresh_exclusive_tokens():
                     seen_addresses.add(addr)
                     meta = t.get('metaInfo', {}) or {}
                     result.append({
-                        'address': t.get('contractAddress', ''),
-                        'symbol': t.get('symbol', ''),
-                        'name': meta.get('name', '') or t.get('symbol', ''),
+                        'tokenAddress': t.get('contractAddress', ''),
+                        'tokenSymbol': t.get('symbol', ''),
+                        'tokenName': meta.get('name', '') or t.get('symbol', ''),
                         'chain': 'BSC',
                         'marketCap': float(t.get('marketCap', 0) or 0),
                         'holders': int(t.get('holders', 0) or 0),
@@ -91,9 +91,9 @@ def refresh_exclusive_tokens():
                     seen_addresses.add(addr)
                     meta = t.get('metaInfo', {}) or {}
                     result.append({
-                        'address': t.get('contractAddress', ''),
-                        'symbol': t.get('symbol', ''),
-                        'name': meta.get('name', '') or t.get('symbol', ''),
+                        'tokenAddress': t.get('contractAddress', ''),
+                        'tokenSymbol': t.get('symbol', ''),
+                        'tokenName': meta.get('name', '') or t.get('symbol', ''),
                         'chain': 'BSC',
                         'marketCap': float(t.get('marketCap', 0) or 0),
                         'holders': int(t.get('holders', 0) or 0),
@@ -153,9 +153,9 @@ def search_binance_tokens(keyword):
                 liquidity >= config.SEARCH_MIN_LIQUIDITY and
                 age_seconds >= config.SEARCH_MIN_AGE_SECONDS):
                 quality_tokens.append({
-                    'address': token.get('contractAddress', ''),
-                    'symbol': token.get('symbol', ''),
-                    'name': token.get('name', ''),
+                    'tokenAddress': token.get('contractAddress', ''),
+                    'tokenSymbol': token.get('symbol', ''),
+                    'tokenName': token.get('name', ''),
                     'chain': chain_name,
                     'marketCap': mcap,
                     'liquidity': liquidity,
@@ -230,11 +230,11 @@ def run_ai_engine(tweet_text, tokens, image_urls=None, local_cache=None, source=
 
     # 转换格式供 AI 使用
     tokens_for_ai = [
-        {'symbol': t.get('tokenSymbol') or t.get('symbol', ''), 
-         'name': t.get('tokenName') or t.get('name', '')} 
+        {'symbol': t.get('tokenSymbol') or t.get('symbol', ''),
+         'name': t.get('tokenName') or t.get('name', '')}
         for t in tokens
     ]
-    
+
     try:
         idx = call_gemini_judge(tweet_text, tokens_for_ai, image_paths)
         if 0 <= idx < len(tokens):
@@ -364,7 +364,7 @@ def match_exclusive_tokens(tweet_text, image_urls=None):
     # 过滤黑名单
     blacklist = load_exclusive_blacklist()
     blacklist_lower = [b.lower() for b in blacklist]
-    tokens = [t for t in all_tokens if t.get('address', '').lower() not in blacklist_lower]
+    tokens = [t for t in all_tokens if t.get('tokenAddress', '').lower() not in blacklist_lower]
 
     if not tokens:
         return []

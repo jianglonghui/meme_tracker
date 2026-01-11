@@ -208,35 +208,20 @@ def process_news_item(news_data, full_content, all_images):
     log_attempt(author, content, [], 0, 0, [], event_type, ref_author, ref_author_name)
 
     try:
-        # 1. 处理老币 (专属列表) - 特殊逻辑，依然保留独立横扫
-        def match_old():
-            matched = match_exclusive_tokens(tweet_text, all_images)
-            if matched:
-                current_time_ms = int(time.time() * 1000)
-                formatted = [{
-                    'tokenAddress': t.get('address') or t.get('tokenAddress'),
-                    'tokenSymbol': t.get('symbol') or t.get('tokenSymbol'),
-                    'tokenName': t.get('name') or t.get('tokenName'),
-                    'chain': t.get('chain'),
-                    'marketCap': t.get('marketCap'),
-                    'source': 'exclusive',
-                    '_match_method': t.get('_match_method', 'ai'),
-                    '_token_source': t.get('_token_source', 'exclusive'),
-                    '_match_time_cost': t.get('_match_time_cost', 0),
-                    '_system_latency': current_time_ms - (news_time * 1000)
-                } for t in matched]
-                return formatted
-            return []
-
-        # 2. 处理新币 (通过 Orchestrator)
+        # 1. 准备新币列表
         with token_lock:
             current_tokens = list(token_list)
         
-        # 启动主撮合逻辑
-        orchestrator.handle_news(news_data, tweet_text, all_images, current_tokens)
-        
-        # 异步执行老币匹配
-        executor.submit(lambda: [on_match_found(news_data, [], res) for res in [match_old()] if res])
+        # 2. 准备老币列表 (专属列表)
+        exclusive_tokens = get_exclusive_tokens()
+        filtered_exclusive = []
+        if exclusive_tokens:
+            blacklist = load_exclusive_blacklist()
+            blacklist_lower = [b.lower() for b in blacklist]
+            filtered_exclusive = [t for t in exclusive_tokens if t.get('address', '').lower() not in blacklist_lower]
+
+        # 3. 启动统一撮合逻辑 (新币 + 老币)
+        orchestrator.handle_news(news_data, tweet_text, all_images, current_tokens, filtered_exclusive)
 
     except Exception as e:
         log_error(f"处理推文异常: {e}")

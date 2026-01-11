@@ -4,6 +4,7 @@ AI 客户端模块
 - Gemini API 调用（支持图片）
 """
 import json
+import time
 import requests
 import config
 from .blacklist import build_blacklist_prompt
@@ -72,9 +73,12 @@ def get_best_practices():
             proxies={'http': None, 'https': None}
         )
         if resp.status_code == 200:
-            return resp.json()
-    except:
-        pass
+            practices = resp.json()
+            if practices:
+                print(f"[AI] 获取到 {len(practices)} 条最佳实践样例", flush=True)
+            return practices
+    except Exception as e:
+        print(f"[AI] 获取最佳实践失败: {e}", flush=True)
     return []
 
 
@@ -91,25 +95,31 @@ def build_examples_prompt():
     return examples
 
 
-def parse_json_response(content):
+def parse_json_response(content, source="AI"):
     """解析 AI 返回的 JSON 数组"""
     keywords = None
-    if content.startswith('['):
-        keywords = json.loads(content)
-    elif '```json' in content:
-        json_part = content.split('```json')[1].split('```')[0].strip()
-        keywords = json.loads(json_part)
-    elif '```' in content:
-        json_part = content.split('```')[1].split('```')[0].strip()
-        if json_part.startswith('['):
+    try:
+        if content.startswith('['):
+            keywords = json.loads(content)
+        elif '```json' in content:
+            json_part = content.split('```json')[1].split('```')[0].strip()
             keywords = json.loads(json_part)
-    elif '[' in content:
-        start = content.index('[')
-        end = content.rindex(']') + 1
-        keywords = json.loads(content[start:end])
+        elif '```' in content:
+            json_part = content.split('```')[1].split('```')[0].strip()
+            if json_part.startswith('['):
+                keywords = json.loads(json_part)
+        elif '[' in content:
+            start = content.index('[')
+            end = content.rindex(']') + 1
+            keywords = json.loads(content[start:end])
 
-    if keywords:
-        return [k.lower() for k in keywords if isinstance(k, str)][:3]
+        if keywords:
+            result = [k.lower() for k in keywords if isinstance(k, str)][:3]
+            return result
+    except json.JSONDecodeError as e:
+        print(f"[{source}] JSON解析失败: {e}, 原始内容: {_truncate(content, 100)}", flush=True)
+    except Exception as e:
+        print(f"[{source}] 解析异常: {e}", flush=True)
     return []
 
 
@@ -127,6 +137,7 @@ def call_deepseek(news_content):
         news_content=news_content
     )
 
+    start = time.time()
     try:
         headers = {
             "Authorization": f"Bearer {config.DEEPSEEK_API_KEY}",
@@ -141,10 +152,13 @@ def call_deepseek(news_content):
         if resp.status_code == 200:
             result = resp.json()
             content = result['choices'][0]['message']['content'].strip()
-            return parse_json_response(content)
+            keywords = parse_json_response(content, "DeepSeek")
+            print(f"[DeepSeek] OK {time.time()-start:.1f}s -> {keywords}", flush=True)
+            return keywords
+        print(f"[DeepSeek] HTTP {resp.status_code}", flush=True)
     except Exception as e:
         log_error(f"DeepSeek API: {e}")
-        print(f"[DeepSeek] 异常: {e}", flush=True)
+        print(f"[DeepSeek] 失败: {e}", flush=True)
     return []
 
 
@@ -152,6 +166,9 @@ def call_gemini(news_content, image_paths=None):
     """调用 Gemini API 提取关键词（支持图片）"""
     if not config.GEMINI_API_KEY:
         return []
+
+    start = time.time()
+    img_count = len(image_paths) if image_paths else 0
 
     try:
         from google import genai
@@ -185,7 +202,7 @@ def call_gemini(news_content, image_paths=None):
                         mime_type = "image/gif"
                     parts.append(types.Part.from_bytes(data=img_data, mime_type=mime_type))
                 except Exception as e:
-                    print(f"[Gemini] 添加图片失败: {e}", flush=True)
+                    print(f"[Gemini] 图片加载失败: {e}", flush=True)
 
         contents = [types.Content(role="user", parts=parts)]
 
@@ -194,14 +211,16 @@ def call_gemini(news_content, image_paths=None):
             contents=contents,
         )
 
-        return parse_json_response(response.text.strip())
+        keywords = parse_json_response(response.text.strip(), "Gemini")
+        print(f"[Gemini] OK {time.time()-start:.1f}s img={img_count} -> {keywords}", flush=True)
+        return keywords
 
     except ImportError:
         log_error("Gemini: 需要安装 google-genai")
-        print("[Gemini] 需要安装 google-genai: pip install google-genai", flush=True)
+        print("[Gemini] 缺少 google-genai 库", flush=True)
     except Exception as e:
         log_error(f"Gemini API: {e}")
-        print(f"[Gemini] 异常: {e}", flush=True)
+        print(f"[Gemini] 失败: {e}", flush=True)
     return []
 
 
@@ -265,6 +284,7 @@ def call_gemini_judge(tweet_text, tokens, image_paths=None):
 
         contents = [types.Content(role="user", parts=parts)]
 
+        start = time.time()
         response = client.models.generate_content(
             model="gemini-3-flash-preview",
             contents=contents,
@@ -273,20 +293,24 @@ def call_gemini_judge(tweet_text, tokens, image_paths=None):
         result = response.text.strip().lower()
 
         if result == 'none' or not result:
+            print(f"[Gemini Judge] OK {time.time()-start:.1f}s -> 无匹配", flush=True)
             return -1
 
         try:
             idx = int(result.replace('.', '').strip()) - 1
             if 0 <= idx < len(tokens):
+                matched = tokens[idx]
+                print(f"[Gemini Judge] OK {time.time()-start:.1f}s -> {matched.get('symbol', '')}", flush=True)
                 return idx
         except ValueError:
             pass
 
+        print(f"[Gemini Judge] OK {time.time()-start:.1f}s -> 解析失败: {result}", flush=True)
         return -1
 
     except Exception as e:
         log_error(f"Gemini Judge: {e}")
-        print(f"[Gemini Judge] 异常: {e}", flush=True)
+        print(f"[Gemini Judge] 失败: {e}", flush=True)
     return -1
 
 
@@ -331,6 +355,7 @@ def call_deepseek_fast_judge(tweet_text, tokens):
 
 只返回序号或 "none"："""
 
+    start = time.time()
     try:
         headers = {
             "Authorization": f"Bearer {config.DEEPSEEK_API_KEY}",
@@ -346,6 +371,7 @@ def call_deepseek_fast_judge(tweet_text, tokens):
             result = resp.json()['choices'][0]['message']['content'].strip().lower()
 
             if result == 'none' or not result:
+                print(f"[DeepSeek Fast] OK {time.time()-start:.1f}s -> 无匹配", flush=True)
                 return []
 
             # 解析返回的序号列表
@@ -358,10 +384,13 @@ def call_deepseek_fast_judge(tweet_text, tokens):
                 except ValueError:
                     continue
 
+            matched_symbols = [tokens[i].get('symbol', '') for i in matched_indices]
+            print(f"[DeepSeek Fast] OK {time.time()-start:.1f}s -> {matched_symbols}", flush=True)
             return matched_indices
+        print(f"[DeepSeek Fast] HTTP {resp.status_code}", flush=True)
     except Exception as e:
         log_error(f"DeepSeek Fast Judge: {e}")
-        print(f"[DeepSeek Fast] 异常: {e}", flush=True)
+        print(f"[DeepSeek Fast] 失败: {e}", flush=True)
     return []
 
 
@@ -380,13 +409,10 @@ def extract_keywords(content, image_urls=None):
                 path = get_cached_image(url)
                 if path:
                     image_paths.append(path)
-            if image_paths:
-                print(f"[Gemini] 处理 {len(image_paths)} 张图片...", flush=True)
 
         keywords = call_gemini(content, image_paths if image_paths else None)
         if keywords:
             return keywords, 'gemini'
-        print("[Gemini] 未提取到关键词，回退到 DeepSeek", flush=True)
 
     keywords = call_deepseek(content)
     return keywords, 'deepseek'

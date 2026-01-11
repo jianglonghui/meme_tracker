@@ -584,13 +584,9 @@ if __name__ == "__main__":
     port = config.get_port('token')
     print(f"代币发现服务启动: http://127.0.0.1:{port}", flush=True)
 
-    # 启动前先获取一次代币，避免启动后等待
-    print("正在获取初始代币数据...", flush=True)
-    fetch_tokens()
-    stats['last_fetch'] = time.time()
-    print(f"初始代币获取完成，共 {stats['total_tokens']} 个", flush=True)
-
+    # 先启动后台获取线程，不阻塞服务启动
     fetcher_thread = threading.Thread(target=token_fetcher, daemon=True)
     fetcher_thread.start()
+    print("后台代币获取线程已启动", flush=True)
 
     app.run(host='0.0.0.0', port=port, debug=False, threaded=True)

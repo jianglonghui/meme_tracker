@@ -37,11 +37,15 @@ class NewsSession:
         """初始横扫：匹配已有的代币列表"""
         if not tokens: return []
         
-        # 过滤处于窗口内的代币
-        window_tokens = [t for t in tokens if self.is_in_window(t.get('createTime', 0))]
-        if not window_tokens: return []
+        # 只有新币模式才强制检查时间窗口
+        if source == 'new':
+            tokens_to_match = [t for t in tokens if self.is_in_window(t.get('createTime', 0))]
+        else:
+            tokens_to_match = tokens
+
+        if not tokens_to_match: return []
         
-        return self._execute_engines(window_tokens, source)
+        return self._execute_engines(tokens_to_match, source)
 
     def match_single_token(self, token, source='new'):
         """增量匹配：匹配新产生的单个代币"""
@@ -128,7 +132,7 @@ class MatchOrchestrator:
         # 定时清理过期会话
         threading.Thread(target=self._cleanup_loop, daemon=True).start()
 
-    def handle_news(self, news_data, full_content, all_images, existing_tokens):
+    def handle_news(self, news_data, full_content, all_images, existing_tokens, exclusive_tokens=None):
         """处理新推文：创建会话并进行三引擎并行匹配（全收策略）"""
         session = NewsSession(news_data, full_content, all_images, self)
         tweet_id = session.tweet_id
@@ -136,24 +140,35 @@ class MatchOrchestrator:
         with self.sessions_lock:
             self.sessions[tweet_id] = session
 
-        # 过滤窗口内的代币
+        # 1. 处理新币 (原有逻辑)
         window_tokens = [t for t in existing_tokens if session.is_in_window(t.get('createTime', 0))]
-        if not window_tokens:
-            return
+        if window_tokens:
+            # 三引擎并行执行（新币）
+            initial_new_matches = session.match_token_list(window_tokens, source='new')
+            if initial_new_matches:
+                self.send_callback(news_data, [], initial_new_matches)
 
-        # 三引擎并行执行（全收策略：每个引擎命中都发送，去重）
-        # 1. 硬编码引擎 (同步，最快)
-        initial_matches = session.match_token_list(window_tokens, source='new')
-        if initial_matches:
-            self.send_callback(news_data, [], initial_matches)
+            if stats.get('enable_ai_fast_match', True):
+                self.executor.submit(self._run_ai_fast_task, session, window_tokens, source='new')
 
-        # 2. AI 快速引擎 (异步，DeepSeek chat)
-        if stats.get('enable_ai_fast_match', True):
-            self.executor.submit(self._run_ai_fast_task, session, window_tokens, source='new')
+            if stats.get('enable_ai_match', True):
+                self.executor.submit(self._run_ai_task, session, window_tokens, source='new')
 
-        # 3. AI 精准引擎 (异步，Gemini + 图片)
-        if stats.get('enable_ai_match', True):
-            self.executor.submit(self._run_ai_task, session, window_tokens, source='new')
+        # 2. 处理老币 (新增逻辑：接入三引擎)
+        if exclusive_tokens:
+            # 同样三引擎并行
+            # 2.1 硬编码引擎 (同步)
+            initial_old_matches = session.match_token_list(exclusive_tokens, source='exclusive')
+            if initial_old_matches:
+                self.send_callback(news_data, [], initial_old_matches)
+
+            # 2.2 AI 快速引擎 (异步)
+            if stats.get('enable_ai_fast_match', True):
+                self.executor.submit(self._run_ai_fast_task, session, exclusive_tokens, source='exclusive')
+
+            # 2.3 AI 精准引擎 (异步)
+            if stats.get('enable_ai_match', True):
+                self.executor.submit(self._run_ai_task, session, exclusive_tokens, source='exclusive')
 
     def handle_token(self, token_data):
         """处理新代币：推送到所有活跃的推文会话（三引擎并行全收）"""
