@@ -290,6 +290,81 @@ def call_gemini_judge(tweet_text, tokens, image_paths=None):
     return -1
 
 
+def call_deepseek_fast_judge(tweet_text, tokens):
+    """调用 DeepSeek chat 模型快速判断推文与代币的关联
+
+    特点：
+    - 使用 deepseek-chat（非 reason 模型），速度快
+    - 强调中英文翻译、谐音、缩写匹配
+    - 不支持图片，纯文本匹配
+
+    Args:
+        tweet_text: 推文内容
+        tokens: 代币列表 [{'symbol': '', 'name': ''}, ...]
+
+    Returns:
+        匹配的代币索引列表（0-based），无匹配返回空列表
+    """
+    if not config.DEEPSEEK_API_KEY or not tokens:
+        return []
+
+    token_list_str = [f"{i+1}. symbol:{t['symbol']} name:{t['name']}" for i, t in enumerate(tokens)]
+    token_str = "\n".join(token_list_str)
+
+    prompt = f"""判断推文是否提及以下代币列表中的代币。
+
+推文: {tweet_text}
+
+代币列表:
+{token_str}
+
+匹配规则（重要）:
+- 翻译匹配：中文词 ↔ 英文词（如 "狗狗" ↔ "DOGE"，"青蛙" ↔ "PEPE"，"牛" ↔ "BULL"）
+- 谐音匹配：发音相似（如 "踏马" ↔ "TM"，"韭菜" ↔ "JC"）
+- 缩写匹配：首字母或简写（如 "我踏马" ↔ "WTM"）
+- 语义匹配：含义相关（如 "牛市" ↔ "BULL"，"起飞" ↔ "MOON"）
+- 包含匹配：推文包含代币名或符号
+
+返回格式：
+- 如果有匹配，返回所有匹配的代币序号，用逗号分隔（如 "1,3,5"）
+- 如果没有匹配，返回 "none"
+
+只返回序号或 "none"："""
+
+    try:
+        headers = {
+            "Authorization": f"Bearer {config.DEEPSEEK_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "deepseek-chat",  # 非 reason 模型，速度快
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 32
+        }
+        resp = requests.post(config.DEEPSEEK_API_URL, headers=headers, json=payload, timeout=10)
+        if resp.status_code == 200:
+            result = resp.json()['choices'][0]['message']['content'].strip().lower()
+
+            if result == 'none' or not result:
+                return []
+
+            # 解析返回的序号列表
+            matched_indices = []
+            for part in result.replace(' ', '').split(','):
+                try:
+                    idx = int(part.replace('.', '').strip()) - 1
+                    if 0 <= idx < len(tokens) and idx not in matched_indices:
+                        matched_indices.append(idx)
+                except ValueError:
+                    continue
+
+            return matched_indices
+    except Exception as e:
+        log_error(f"DeepSeek Fast Judge: {e}")
+        print(f"[DeepSeek Fast] 异常: {e}", flush=True)
+    return []
+
+
 def extract_keywords(content, image_urls=None):
     """提取关键词：默认使用 Gemini，失败时回退到 DeepSeek
 

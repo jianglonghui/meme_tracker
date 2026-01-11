@@ -2,7 +2,7 @@ import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import config
-from .matchers import run_hardcoded_engine, run_ai_engine
+from .matchers import run_hardcoded_engine, run_ai_engine, run_ai_fast_engine
 from .state import log_match, log_error, stats
 
 class NewsSession:
@@ -74,21 +74,47 @@ class NewsSession:
         return matched_results
 
     def execute_ai_engine_async(self, tokens, source='new'):
-        """后台执行 AI 引擎"""
+        """后台执行 Gemini AI 引擎"""
         # 过滤掉已经匹配过的
         with self.lock:
             remaining = [t for t in tokens if t.get('tokenAddress') not in self.matched_token_ids]
-        
+
         if not remaining: return []
-        
+
         ai_matches = run_ai_engine(self.content, remaining, self.images, self.local_cache, source)
         if ai_matches:
-            current_time_ms = int(time.time() * 1000) # AI 运行完后再取时间
+            current_time_ms = int(time.time() * 1000)
+            new_matches = []
             with self.lock:
                 for m in ai_matches:
-                    m['_system_latency'] = current_time_ms - (self.news_time * 1000)
-                    self.matched_token_ids.add(m.get('tokenAddress'))
-            return ai_matches
+                    token_addr = m.get('tokenAddress')
+                    if token_addr not in self.matched_token_ids:  # 再次检查去重
+                        m['_system_latency'] = current_time_ms - (self.news_time * 1000)
+                        self.matched_token_ids.add(token_addr)
+                        new_matches.append(m)
+            return new_matches
+        return []
+
+    def execute_ai_fast_engine_async(self, tokens, source='new'):
+        """后台执行 DeepSeek 快速 AI 引擎"""
+        # 过滤掉已经匹配过的
+        with self.lock:
+            remaining = [t for t in tokens if t.get('tokenAddress') not in self.matched_token_ids]
+
+        if not remaining: return []
+
+        ai_fast_matches = run_ai_fast_engine(self.content, remaining, self.local_cache, source)
+        if ai_fast_matches:
+            current_time_ms = int(time.time() * 1000)
+            new_matches = []
+            with self.lock:
+                for m in ai_fast_matches:
+                    token_addr = m.get('tokenAddress')
+                    if token_addr not in self.matched_token_ids:  # 再次检查去重
+                        m['_system_latency'] = current_time_ms - (self.news_time * 1000)
+                        self.matched_token_ids.add(token_addr)
+                        new_matches.append(m)
+            return new_matches
         return []
 
 class MatchOrchestrator:
@@ -103,51 +129,79 @@ class MatchOrchestrator:
         threading.Thread(target=self._cleanup_loop, daemon=True).start()
 
     def handle_news(self, news_data, full_content, all_images, existing_tokens):
-        """处理新推文：创建会话并进行初始横扫"""
+        """处理新推文：创建会话并进行三引擎并行匹配（全收策略）"""
         session = NewsSession(news_data, full_content, all_images, self)
         tweet_id = session.tweet_id
-        
+
         with self.sessions_lock:
             self.sessions[tweet_id] = session
-            
-        # 1. 初始硬编码横扫
-        initial_matches = session.match_token_list(existing_tokens, source='new')
+
+        # 过滤窗口内的代币
+        window_tokens = [t for t in existing_tokens if session.is_in_window(t.get('createTime', 0))]
+        if not window_tokens:
+            return
+
+        # 三引擎并行执行（全收策略：每个引擎命中都发送，去重）
+        # 1. 硬编码引擎 (同步，最快)
+        initial_matches = session.match_token_list(window_tokens, source='new')
         if initial_matches:
             self.send_callback(news_data, [], initial_matches)
-            
-        # 2. 初始 AI 横扫 (异步)
-        window_tokens = [t for t in existing_tokens if session.is_in_window(t.get('createTime', 0))]
-        if window_tokens:
+
+        # 2. AI 快速引擎 (异步，DeepSeek chat)
+        if stats.get('enable_ai_fast_match', True):
+            self.executor.submit(self._run_ai_fast_task, session, window_tokens, source='new')
+
+        # 3. AI 精准引擎 (异步，Gemini + 图片)
+        if stats.get('enable_ai_match', True):
             self.executor.submit(self._run_ai_task, session, window_tokens, source='new')
 
     def handle_token(self, token_data):
-        """处理新代币：推送到所有活跃的推文会话"""
+        """处理新代币：推送到所有活跃的推文会话（三引擎并行全收）"""
         current_time = time.time()
         active_sessions = []
-        
+
         with self.sessions_lock:
             for sid, session in list(self.sessions.items()):
                 if session.is_active(current_time):
                     active_sessions.append(session)
-        
+
         for session in active_sessions:
-            # 1. 硬编码匹配
+            if not session.is_in_window(token_data.get('createTime', 0)):
+                continue
+
+            # 三引擎并行执行（全收策略）
+            # 1. 硬编码匹配 (同步)
             matches = session.match_single_token(token_data, source='new')
             if matches:
                 self.send_callback(session.news_data, [], matches)
-            else:
-                # 2. 如果硬编码没中，且符合窗口，可以尝试 AI (异步)
-                if session.is_in_window(token_data.get('createTime', 0)):
-                    self.executor.submit(self._run_ai_task, session, [token_data], source='new')
+
+            # 2. AI 快速引擎 (异步)
+            if stats.get('enable_ai_fast_match', True):
+                self.executor.submit(self._run_ai_fast_task, session, [token_data], source='new')
+
+            # 3. AI 精准引擎 (异步)
+            if stats.get('enable_ai_match', True):
+                self.executor.submit(self._run_ai_task, session, [token_data], source='new')
 
     def _run_ai_task(self, session, tokens, source='new'):
-        """AI 任务执行逻辑"""
+        """Gemini AI 任务执行逻辑"""
         try:
             ai_matches = session.execute_ai_engine_async(tokens, source)
             if ai_matches:
+                print(f"[Gemini] 匹配到 {len(ai_matches)} 个代币", flush=True)
                 self.send_callback(session.news_data, [], ai_matches)
         except Exception as e:
             log_error(f"Orchestrator AI Task: {e}")
+
+    def _run_ai_fast_task(self, session, tokens, source='new'):
+        """DeepSeek 快速 AI 任务执行逻辑"""
+        try:
+            ai_fast_matches = session.execute_ai_fast_engine_async(tokens, source)
+            if ai_fast_matches:
+                print(f"[DeepSeek Fast] 匹配到 {len(ai_fast_matches)} 个代币", flush=True)
+                self.send_callback(session.news_data, [], ai_fast_matches)
+        except Exception as e:
+            log_error(f"Orchestrator AI Fast Task: {e}")
 
     def get_active_sessions_info(self):
         """获取当前活跃会话的详细信息（符合用户要求的特定格式）"""

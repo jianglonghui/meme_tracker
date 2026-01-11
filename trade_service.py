@@ -30,7 +30,8 @@ DEFAULT_CONFIG = {
     'new_token_buy_amount': 0.5,    # 新币买入金额 BNB
     'old_token_buy_amount': 0.3,    # 老币买入金额 BNB
     'sell_trigger_multiple': 2.0,   # 翻倍触发卖出
-    'sell_percentage': 0.5,         # 每次卖出比例
+    'sell_percentage': 0.5,         # 新币出本比例
+    'old_coin_recover_ratio': 0.5,  # 老币出本比例
     'stop_loss_ratio': 0.5,         # 跌到买入价的50%止损
     'max_positions': 10,            # 最大持仓数
     'telegram_api_url': 'http://127.0.0.1:5060/trade',
@@ -38,6 +39,8 @@ DEFAULT_CONFIG = {
     'whitelist_mode': 'any',        # 白名单模式: 'any'=任一满足, 'author'=仅作者, 'token'=仅代币, 'both'=两者都要
     'no_change_timeout': 20,        # 无波动超时（秒），0=禁用
     'allow_new_token_by_author': True, # 新币模式：如果作者在白名单，即使代币不在白名单也买入（针对 'both' 模式）
+    'old_coin_delay_threshold': 10, # 老币延迟阈值（秒），超过则金额减半
+    'old_coin_delay_discount': 0.5, # 老币延迟折扣（0.5=买一半）
 }
 
 # 运行时配置
@@ -344,8 +347,8 @@ def is_token_name_valid(name):
     """
     检查代币名称是否符合要求
     1. 如果包含中文，则不允许包含数字、空格或符号（只允许汉字、字母）
-    2. 中文名：少于5个汉字
-    3. 英文名：少于3个单词
+    - 中文名：不超过5个汉字
+    - 英文名：少于3个单词
     返回: (is_valid, reason)
     """
     if not name:
@@ -372,6 +375,7 @@ def is_token_name_valid(name):
             return False, f'中符混合 (含 {c})'
 
         # 2. 长度检查：汉字数量是否少于5个
+        # 有汉字，按汉字计数
         if chinese_chars > 5:
             return False, f'名称含{chinese_chars}个汉字(>5)'
         return True, None
@@ -494,6 +498,26 @@ def get_token_mcap(address):
 
 # ==================== 交易执行 ====================
 
+def calculate_buy_amount(token_source, news_time):
+    """
+    根据代币类型和推文延迟计算买入金额
+    - 老币且延迟超过阈值：金额减半
+    """
+    buy_amount = runtime_config.get('old_token_buy_amount', runtime_config.get('default_buy_amount', 0.3))
+    is_old_coin = token_source not in ('', 'new')
+
+    if is_old_coin and news_time > 0:
+        delay = time.time() - news_time
+        threshold = runtime_config.get('old_coin_delay_threshold', 10)
+        if delay > threshold:
+            discount = runtime_config.get('old_coin_delay_discount', 0.5)
+            amount = base_amount * discount
+            print(f"[Trade] 老币延迟 {delay:.1f}s > {threshold}s，金额 {base_amount} → {amount}", flush=True)
+            return amount
+
+    return base_amount
+
+
 def send_trade_command(action, address, amount, wait_reply=False):
     """发送交易指令到 Telegram"""
     max_retries = 3
@@ -536,7 +560,7 @@ def send_trade_command(action, address, amount, wait_reply=False):
     return {'success': False, 'error': 'Max retries exceeded for unknown status'}
 
 
-def execute_buy(token_data, trigger_type):
+def execute_buy(token_data, trigger_type, token_source='', news_time=0):
     """执行买入"""
     address = token_data.get('token_address', '')
     symbol = token_data.get('token_symbol', '')
@@ -565,9 +589,10 @@ def execute_buy(token_data, trigger_type):
     if is_new_token:
         buy_amount = runtime_config.get('new_token_buy_amount', runtime_config.get('default_buy_amount', 0.5))
     else:
-        buy_amount = runtime_config.get('old_token_buy_amount', runtime_config.get('default_buy_amount', 0.3))
-
+        # 根据代币类型和延迟计算买入金额
+        buy_amount = calculate_buy_amount(token_source, news_time)
     print(f"[Trade] {'新币' if is_new_token else '老币'} {symbol} 买入金额: {buy_amount} BNB", flush=True)
+    
 
     # 发送买入指令
     result = send_trade_command('buy', address, buy_amount, wait_reply=True)
@@ -592,6 +617,7 @@ def execute_buy(token_data, trigger_type):
                 'next_sell_multiple': runtime_config.get('sell_trigger_multiple', 2.0),
                 'status': 'holding',
                 'trigger_type': trigger_type,
+                'token_source': token_source,  # 保存代币来源用于出本比例判断
                 'created_at': time.time(),
                 'updated_at': time.time(),
                 'mcap_history': [{'time': 0, 'mcap': mcap}],  # 市值历史 [{time: 秒, mcap: 市值}]
@@ -784,7 +810,13 @@ def monitor_positions():
 
                     # 止盈检查: 达到目标倍数卖出
                     next_multiple = pos.get('next_sell_multiple', 2.0)
-                    sell_pct = runtime_config.get('sell_percentage', 0.5)
+                    # 根据代币来源选择出本比例（新币/老币分开配置）
+                    token_source = pos.get('token_source', '')
+                    is_old_coin = token_source not in ('', 'new')
+                    if is_old_coin:
+                        sell_pct = runtime_config.get('old_coin_recover_ratio', 0.5)
+                    else:
+                        sell_pct = runtime_config.get('sell_percentage', 0.5)
 
                     if ratio >= next_multiple:
                         print(f"[Trade] {pos['symbol']} 触发止盈 ({ratio:.2f}x >= {next_multiple}x)", flush=True)
@@ -855,6 +887,7 @@ def receive_signal():
 
     author = data.get('author', '')
     tokens = data.get('tokens', [])
+    news_time = data.get('news_time', 0)  # 推文时间（秒级时间戳）
 
     if not tokens:
         return jsonify({'success': False, 'action': 'skip', 'reason': '无代币'})
@@ -990,8 +1023,8 @@ def receive_signal():
             'is_new_token': is_new_token,  # 是否为新币
         }
 
-        # 执行买入
-        position_id = execute_buy(token_data, trigger_type)
+        # 执行买入（传递 token_source 和 news_time 用于延迟判断）
+        position_id = execute_buy(token_data, trigger_type, token_source, news_time)
 
         if position_id:
             results.append({
@@ -1091,10 +1124,11 @@ def handle_config():
         return jsonify({'success': False, 'error': '无数据'}), 400
 
     # 更新配置
-    for key in ['enabled', 'default_buy_amount', 'new_token_buy_amount', 'old_token_buy_amount',
-                'sell_trigger_multiple', 'sell_percentage', 'stop_loss_ratio', 'max_positions',
-                'telegram_api_url', 'monitor_interval', 'whitelist_mode',
-                'no_change_timeout', 'allow_new_token_by_author']:
+    for key in ['enabled', 'default_buy_amount', 'sell_trigger_multiple',
+                'sell_percentage', 'old_coin_recover_ratio', 'stop_loss_ratio',
+                'max_positions', 'telegram_api_url', 'monitor_interval',
+                'whitelist_mode', 'no_change_timeout', 'allow_new_token_by_author',
+                'old_coin_delay_threshold', 'old_coin_delay_discount']:
         if key in data:
             runtime_config[key] = data[key]
 
