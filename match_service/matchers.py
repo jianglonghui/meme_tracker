@@ -17,7 +17,7 @@ from .state import (
 )
 from .blacklist import load_exclusive_blacklist
 from .utils import match_name_in_tweet, get_cached_image
-from .ai_clients import call_gemini_judge
+from .ai_clients import call_gemini_judge, call_deepseek_fast_judge
 
 MIN_MATCH_SCORE = 2.0
 
@@ -261,6 +261,54 @@ def run_ai_engine(tweet_text, tokens, image_urls=None, local_cache=None, source=
     except Exception as e:
         print(f"[AI Engine] 异常: {e}", flush=True)
         
+    return []
+
+
+def run_ai_fast_engine(tweet_text, tokens, local_cache=None, source='new'):
+    """执行 AI 快速匹配（DeepSeek chat，无图片，中英文语义匹配）"""
+    if not tokens or not config.DEEPSEEK_API_KEY:
+        return []
+
+    # 转换格式供 AI 使用
+    tokens_for_ai = [
+        {'symbol': t.get('tokenSymbol') or t.get('symbol', ''),
+         'name': t.get('tokenName') or t.get('name', '')}
+        for t in tokens
+    ]
+
+    try:
+        matched_indices = call_deepseek_fast_judge(tweet_text, tokens_for_ai)
+        if not matched_indices:
+            return []
+
+        matched = []
+        for idx in matched_indices:
+            if 0 <= idx < len(tokens):
+                token_copy = tokens[idx].copy()
+                token_copy['_match_score'] = 4.5  # 略低于 Gemini
+                token_copy['_matched_keyword'] = token_copy.get('tokenSymbol') or token_copy.get('symbol', '')
+                token_copy['_match_type'] = 'ai_fast_match'
+                token_copy['_match_method'] = 'ai_fast'
+                token_copy['_token_source'] = source
+
+                if source == 'new':
+                    create_time = token_copy.get('createTime', 0)
+                    token_copy['_match_time_cost'] = int(time.time() * 1000) - create_time if create_time else 0
+                else:
+                    token_copy['_match_time_cost'] = 0
+
+                # 加入缓存
+                if local_cache is not None:
+                    symbol = (token_copy.get('tokenSymbol') or token_copy.get('symbol') or '').lower()
+                    if symbol:
+                        local_cache.add(symbol)
+
+                matched.append(token_copy)
+
+        return matched
+    except Exception as e:
+        print(f"[AI Fast Engine] 异常: {e}", flush=True)
+
     return []
 
 

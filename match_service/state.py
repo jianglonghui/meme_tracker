@@ -14,7 +14,9 @@ stats = {
     'running': True,
     'last_match': None,
     'errors': 0,
-    'enable_hardcoded_match': True
+    'enable_hardcoded_match': True,
+    'enable_ai_fast_match': True,   # DeepSeek 快速匹配
+    'enable_ai_match': True         # Gemini 精准匹配
 }
 
 # ==================== 代币列表缓存 ====================
