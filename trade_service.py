@@ -503,7 +503,7 @@ def calculate_buy_amount(token_source, news_time):
     根据代币类型和推文延迟计算买入金额
     - 老币且延迟超过阈值：金额减半
     """
-    buy_amount = runtime_config.get('old_token_buy_amount', runtime_config.get('default_buy_amount', 0.3))
+    base_amount = runtime_config.get('old_token_buy_amount', runtime_config.get('default_buy_amount', 0.3))
     is_old_coin = token_source not in ('', 'new')
 
     if is_old_coin and news_time > 0:
@@ -1124,9 +1124,9 @@ def handle_config():
         return jsonify({'success': False, 'error': '无数据'}), 400
 
     # 更新配置
-    for key in ['enabled', 'default_buy_amount', 'sell_trigger_multiple',
-                'sell_percentage', 'old_coin_recover_ratio', 'stop_loss_ratio',
-                'max_positions', 'telegram_api_url', 'monitor_interval',
+    for key in ['enabled', 'default_buy_amount', 'new_token_buy_amount', 'old_token_buy_amount',
+                'sell_trigger_multiple', 'sell_percentage', 'old_coin_recover_ratio',
+                'stop_loss_ratio', 'max_positions', 'telegram_api_url', 'monitor_interval',
                 'whitelist_mode', 'no_change_timeout', 'allow_new_token_by_author',
                 'old_coin_delay_threshold', 'old_coin_delay_discount']:
         if key in data:
