@@ -28,13 +28,16 @@ DEFAULT_CONFIG = {
     'enabled': True,
     'default_buy_amount': 0.5,      # 默认买入 BNB
     'sell_trigger_multiple': 2.0,   # 翻倍触发卖出
-    'sell_percentage': 0.5,         # 每次卖出比例
+    'sell_percentage': 0.5,         # 新币出本比例
+    'old_coin_recover_ratio': 0.5,  # 老币出本比例
     'stop_loss_ratio': 0.5,         # 跌到买入价的50%止损
     'max_positions': 10,            # 最大持仓数
     'telegram_api_url': 'http://127.0.0.1:5060/trade',
     'monitor_interval': 1.0,        # 监控间隔（秒）
     'whitelist_mode': 'any',        # 白名单模式: 'any'=任一满足, 'author'=仅作者, 'token'=仅代币, 'both'=两者都要
     'no_change_timeout': 20,        # 无波动超时（秒），0=禁用
+    'old_coin_delay_threshold': 10, # 老币延迟阈值（秒），超过则金额减半
+    'old_coin_delay_discount': 0.5, # 老币延迟折扣（0.5=买一半）
 }
 
 # 运行时配置
@@ -338,7 +341,7 @@ def is_token_whitelisted(address):
 def is_token_name_valid(name):
     """
     检查代币名称是否符合长度要求
-    - 中文名：少于5个汉字
+    - 中文名：不超过5个汉字
     - 英文名：少于3个单词
     返回: (is_valid, reason)
     """
@@ -350,8 +353,8 @@ def is_token_name_valid(name):
 
     if chinese_chars > 0:
         # 有汉字，按汉字计数
-        if chinese_chars >= 5:
-            return False, f'名称含{chinese_chars}个汉字(>=5)'
+        if chinese_chars > 5:
+            return False, f'名称含{chinese_chars}个汉字(>5)'
         return True, None
     else:
         # 纯英文，按单词计数
@@ -471,6 +474,26 @@ def get_token_mcap(address):
 
 # ==================== 交易执行 ====================
 
+def calculate_buy_amount(token_source, news_time):
+    """
+    根据代币类型和推文延迟计算买入金额
+    - 老币且延迟超过阈值：金额减半
+    """
+    base_amount = runtime_config.get('default_buy_amount', 0.5)
+    is_old_coin = token_source not in ('', 'new')
+
+    if is_old_coin and news_time > 0:
+        delay = time.time() - news_time
+        threshold = runtime_config.get('old_coin_delay_threshold', 10)
+        if delay > threshold:
+            discount = runtime_config.get('old_coin_delay_discount', 0.5)
+            amount = base_amount * discount
+            print(f"[Trade] 老币延迟 {delay:.1f}s > {threshold}s，金额 {base_amount} → {amount}", flush=True)
+            return amount
+
+    return base_amount
+
+
 def send_trade_command(action, address, amount, wait_reply=False):
     """发送交易指令到 Telegram"""
     try:
@@ -496,7 +519,7 @@ def send_trade_command(action, address, amount, wait_reply=False):
         return {'success': False, 'error': str(e)}
 
 
-def execute_buy(token_data, trigger_type):
+def execute_buy(token_data, trigger_type, token_source='', news_time=0):
     """执行买入"""
     address = token_data.get('token_address', '')
     symbol = token_data.get('token_symbol', '')
@@ -520,7 +543,8 @@ def execute_buy(token_data, trigger_type):
         if existing_pos:
             print(f"[Trade] {symbol} 再次触发，加仓", flush=True)
 
-    buy_amount = runtime_config.get('default_buy_amount', 0.5)
+    # 根据代币类型和延迟计算买入金额
+    buy_amount = calculate_buy_amount(token_source, news_time)
 
     # 发送买入指令
     result = send_trade_command('buy', address, buy_amount, wait_reply=True)
@@ -545,6 +569,7 @@ def execute_buy(token_data, trigger_type):
                 'next_sell_multiple': runtime_config.get('sell_trigger_multiple', 2.0),
                 'status': 'holding',
                 'trigger_type': trigger_type,
+                'token_source': token_source,  # 保存代币来源用于出本比例判断
                 'created_at': time.time(),
                 'updated_at': time.time(),
                 'mcap_history': [{'time': 0, 'mcap': mcap}],  # 市值历史 [{time: 秒, mcap: 市值}]
@@ -708,7 +733,13 @@ def monitor_positions():
 
                     # 止盈检查: 达到目标倍数卖出
                     next_multiple = pos.get('next_sell_multiple', 2.0)
-                    sell_pct = runtime_config.get('sell_percentage', 0.5)
+                    # 根据代币来源选择出本比例（新币/老币分开配置）
+                    token_source = pos.get('token_source', '')
+                    is_old_coin = token_source not in ('', 'new')
+                    if is_old_coin:
+                        sell_pct = runtime_config.get('old_coin_recover_ratio', 0.5)
+                    else:
+                        sell_pct = runtime_config.get('sell_percentage', 0.5)
 
                     if ratio >= next_multiple:
                         print(f"[Trade] {pos['symbol']} 触发止盈 ({ratio:.2f}x >= {next_multiple}x)", flush=True)
@@ -773,6 +804,7 @@ def receive_signal():
 
     author = data.get('author', '')
     tokens = data.get('tokens', [])
+    news_time = data.get('news_time', 0)  # 推文时间（秒级时间戳）
 
     if not tokens:
         return jsonify({'success': False, 'action': 'skip', 'reason': '无代币'})
@@ -886,8 +918,8 @@ def receive_signal():
             'author': author,
         }
 
-        # 执行买入
-        position_id = execute_buy(token_data, trigger_type)
+        # 执行买入（传递 token_source 和 news_time 用于延迟判断）
+        position_id = execute_buy(token_data, trigger_type, token_source, news_time)
 
         if position_id:
             results.append({
@@ -981,9 +1013,10 @@ def handle_config():
 
     # 更新配置
     for key in ['enabled', 'default_buy_amount', 'sell_trigger_multiple',
-                'sell_percentage', 'stop_loss_ratio', 'max_positions',
-                'telegram_api_url', 'monitor_interval', 'whitelist_mode',
-                'no_change_timeout']:
+                'sell_percentage', 'old_coin_recover_ratio', 'stop_loss_ratio',
+                'max_positions', 'telegram_api_url', 'monitor_interval',
+                'whitelist_mode', 'no_change_timeout',
+                'old_coin_delay_threshold', 'old_coin_delay_discount']:
         if key in data:
             runtime_config[key] = data[key]
 

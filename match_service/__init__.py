@@ -54,6 +54,7 @@ def send_to_trade_service(news_data, matched_tokens):
             'author': news_data.get('author', ''),
             'author_name': news_data.get('authorName', ''),
             'content': news_data.get('content', ''),
+            'news_time': news_data.get('time', 0),  # 推文时间（秒级时间戳）
             'tokens': tokens_data,
         }
 
