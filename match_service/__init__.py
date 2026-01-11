@@ -31,7 +31,7 @@ from .matchers import (
     match_new_tokens, match_exclusive_tokens,
     refresh_exclusive_tokens, get_exclusive_tokens, search_binance_tokens
 )
-from .ai_clients import extract_keywords
+from .ai_clients import extract_keywords, warm_up_ai_clients
 from .utils import load_seen_events, save_seen_events, get_cached_image
 from .orchestrator import MatchOrchestrator
 
@@ -472,6 +472,7 @@ def run():
     threading.Thread(target=fetch_token_stream, daemon=True).start()
     threading.Thread(target=fetch_news_stream, daemon=True).start()
     threading.Thread(target=exclusive_tokens_updater, daemon=True).start()
+    threading.Thread(target=warm_up_ai_clients, daemon=True).start()
 
     print(f"[Match Service] 启动在端口 {config.MATCH_PORT}", flush=True)
     app.run(host='0.0.0.0', port=config.MATCH_PORT, debug=False, use_reloader=False)

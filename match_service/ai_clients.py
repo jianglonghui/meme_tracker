@@ -10,6 +10,23 @@ import config
 from .blacklist import build_blacklist_prompt
 from .state import log_error
 
+# 全局会话对象，用于复用 TCP/SSL 连接
+session = requests.Session()
+
+# 全局 Gemini 客户端，用于复用连接池
+gemini_client = None
+
+def get_gemini_client():
+    """获取或初始化全局 Gemini 客户端"""
+    global gemini_client
+    if gemini_client is None and config.GEMINI_API_KEY:
+        try:
+            from google import genai
+            gemini_client = genai.Client(api_key=config.GEMINI_API_KEY)
+        except ImportError:
+            pass
+    return gemini_client
+
 # ==================== 提示词模板 ====================
 DEEPSEEK_PROMPT_TEMPLATE = """作为meme币分析师，从推文中提取最可能被用作代币名称的关键词。
 
@@ -67,7 +84,7 @@ GEMINI_PROMPT_TEMPLATE = """作为meme币分析师，从推文内容和图片中
 def get_best_practices():
     """从 tracker_service 获取最佳实践样例"""
     try:
-        resp = requests.get(
+        resp = session.get(
             f"{config.get_service_url('tracker')}/best_practices",
             timeout=5,
             proxies={'http': None, 'https': None}
@@ -148,7 +165,7 @@ def call_deepseek(news_content):
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 1024
         }
-        resp = requests.post(config.DEEPSEEK_API_URL, headers=headers, json=payload, timeout=30)
+        resp = session.post(config.DEEPSEEK_API_URL, headers=headers, json=payload, timeout=30)
         if resp.status_code == 200:
             result = resp.json()
             content = result['choices'][0]['message']['content'].strip()
@@ -164,17 +181,15 @@ def call_deepseek(news_content):
 
 def call_gemini(news_content, image_paths=None):
     """调用 Gemini API 提取关键词（支持图片）"""
-    if not config.GEMINI_API_KEY:
+    client = get_gemini_client()
+    if not client:
         return []
 
     start = time.time()
     img_count = len(image_paths) if image_paths else 0
 
     try:
-        from google import genai
         from google.genai import types
-
-        client = genai.Client(api_key=config.GEMINI_API_KEY)
 
         examples = build_examples_prompt()
         blacklist_prompt = build_blacklist_prompt()
@@ -215,9 +230,6 @@ def call_gemini(news_content, image_paths=None):
         print(f"[Gemini] OK {time.time()-start:.1f}s img={img_count} -> {keywords}", flush=True)
         return keywords
 
-    except ImportError:
-        log_error("Gemini: 需要安装 google-genai")
-        print("[Gemini] 缺少 google-genai 库", flush=True)
     except Exception as e:
         log_error(f"Gemini API: {e}")
         print(f"[Gemini] 失败: {e}", flush=True)
@@ -226,23 +238,14 @@ def call_gemini(news_content, image_paths=None):
 
 def call_gemini_judge(tweet_text, tokens, image_paths=None):
     """调用 Gemini 判断推文与代币的关联（用于老币匹配）
-
-    Args:
-        tweet_text: 推文内容
-        tokens: 代币列表 [{'symbol': '', 'name': ''}, ...]
-        image_paths: 图片路径列表
-
-    Returns:
-        匹配的代币索引（0-based），无匹配返回 -1
+    Returns: 匹配的代币索引（0-based），无匹配返回 -1
     """
-    if not config.GEMINI_API_KEY:
+    client = get_gemini_client()
+    if not client:
         return -1
 
     try:
-        from google import genai
         from google.genai import types
-
-        client = genai.Client(api_key=config.GEMINI_API_KEY)
 
         token_list_str = [f"{i+1}. symbol:{t['symbol']} name:{t['name']}" for i, t in enumerate(tokens)]
         token_str = "\n".join(token_list_str)
@@ -358,7 +361,7 @@ def call_cerebras_fast_judge(tweet_text, tokens):
             ],
             "temperature": 0
         }
-        resp = requests.post(config.CEREBRAS_API_URL, headers=headers, json=payload, timeout=10)
+        resp = session.post(config.CEREBRAS_API_URL, headers=headers, json=payload, timeout=30)
         if resp.status_code == 200:
             result = resp.json()['choices'][0]['message']['content'].strip().lower()
 
@@ -408,3 +411,33 @@ def extract_keywords(content, image_urls=None):
 
     keywords = call_deepseek(content)
     return keywords, 'deepseek'
+
+
+def warm_up_ai_clients():
+    """预热 AI 客户端，预先建立 TCP/SSL 连接池"""
+    print("[AI Warm-up] 开始预热 AI 引擎...", flush=True)
+    
+    # 1. 预热 Gemini
+    try:
+        get_gemini_client()
+        print("[AI Warm-up] Gemini 客户端已初始化", flush=True)
+    except Exception:
+        pass
+
+    # 2. 预热 Cerebras (发送一个极小的请求)
+    if hasattr(config, 'CEREBRAS_API_KEY') and config.CEREBRAS_API_KEY:
+        try:
+            call_cerebras_fast_judge("warmup", [{"symbol": "warmup", "name": "warmup"}])
+            print("[AI Warm-up] Cerebras 连接已建立", flush=True)
+        except Exception:
+            pass
+
+    # 3. 预热 DeepSeek
+    if hasattr(config, 'DEEPSEEK_API_KEY') and config.DEEPSEEK_API_KEY:
+        try:
+            call_deepseek("warmup")
+            print("[AI Warm-up] DeepSeek 连接已建立", flush=True)
+        except Exception:
+            pass
+
+    print("[AI Warm-up] 预热完成", flush=True)
