@@ -360,10 +360,11 @@ def match_exclusive_tokens(tweet_text, image_urls=None):
     if not all_tokens:
         return []
 
-    # 过滤黑名单
+    # 过滤黑名单（支持新币的 tokenAddress 和老币的 address 字段）
     blacklist = load_exclusive_blacklist()
     blacklist_lower = [b.lower() for b in blacklist]
-    tokens = [t for t in all_tokens if t.get('tokenAddress', '').lower() not in blacklist_lower]
+    tokens = [t for t in all_tokens 
+              if (t.get('tokenAddress', '') or t.get('address', '')).lower() not in blacklist_lower]
 
     if not tokens:
         return []
