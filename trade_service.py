@@ -346,13 +346,29 @@ def is_token_whitelisted(address):
 def is_token_name_valid(name):
     """
     检查代币名称是否符合要求
-    1. 如果包含中文，则不允许包含数字、空格或符号（只允许汉字、字母）
+    1. 不允许包含emoji
+    2. 如果包含中文，则不允许包含数字、空格或符号（只允许汉字、字母）
     - 中文名：不超过5个汉字
     - 英文名：少于3个单词
     返回: (is_valid, reason)
     """
     if not name:
         return True, None
+
+    # 检查是否包含emoji
+    for c in name:
+        code_point = ord(c)
+        # Emoji Unicode范围
+        if (0x1F600 <= code_point <= 0x1F64F or  # 表情符号
+            0x1F300 <= code_point <= 0x1F5FF or  # 各种符号和图形
+            0x1F680 <= code_point <= 0x1F6FF or  # 交通和地图符号
+            0x1F900 <= code_point <= 0x1F9FF or  # 补充符号和图形
+            0x1F1E6 <= code_point <= 0x1F1FF or  # 区域指示符(国旗)
+            0x2600 <= code_point <= 0x26FF or    # 杂项符号
+            0x2700 <= code_point <= 0x27BF or    # 装饰符号
+            0xFE00 <= code_point <= 0xFE0F or    # 变体选择符
+            0x1FA70 <= code_point <= 0x1FAFF):   # 扩展符号和图形
+            return False, f'名称含emoji ({c})'
 
     # 统计汉字数量
     chinese_chars = sum(1 for c in name if '\u4e00' <= c <= '\u9fff')
