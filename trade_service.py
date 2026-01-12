@@ -442,6 +442,59 @@ def is_symbol_in_exclusive(symbol):
     return symbol.upper() in symbols
 
 
+def is_duplicate_name_high_cap(symbol, name):
+    """
+    检查是否已买入过同名代币且其市值曾达到100k
+    该规则用于防止重复买入已经“成功”过的meme币的仿盘或重发盘
+    """
+    if not symbol and not name:
+        return False, None
+        
+    symbol_upper = symbol.upper() if symbol else ""
+    name_upper = name.upper() if name else ""
+
+    # 1. 检查当前持仓 (内存)
+    with positions_lock:
+        for p in positions.values():
+            p_symbol = (p.get('symbol') or "").upper()
+            p_name = (p.get('name') or "").upper()
+            if (symbol_upper and p_symbol == symbol_upper) or (name_upper and p_name == name_upper):
+                if p.get('current_mcap', 0) >= 100000:
+                    return True, f"当前持有相同名称/符号 {p.get('symbol')} 市值已达 {p['current_mcap']:.0f}"
+
+    # 2. 检查历史持仓 (数据库)
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        # 构建查询条件
+        conditions = []
+        params = []
+        if symbol_upper:
+            conditions.append("UPPER(symbol) = ?")
+            params.append(symbol_upper)
+        if name_upper:
+            conditions.append("UPPER(name) = ?")
+            params.append(name_upper)
+            
+        if not conditions:
+            return False, None
+            
+        where_clause = " OR ".join(conditions)
+        query = f"SELECT symbol, current_mcap FROM positions WHERE current_mcap >= 100000 AND ({where_clause}) LIMIT 1"
+        
+        cursor.execute(query, params)
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            return True, f"历史记录中相同名称/符号 {row['symbol']} 市值曾达 {row['current_mcap']:.0f}"
+    except Exception as e:
+        print(f"[Trade] 检查历史市值异常: {e}", flush=True)
+
+    return False, None
+
+
 # ==================== 市值查询 ====================
 
 def get_token_mcap_dex(address):
@@ -1017,6 +1070,33 @@ def receive_signal():
                     price=token.get('price', '0'),
                     mcap=float(token.get('market_cap', 0) or token.get('marketCap', 0) or 0),
                     response={'filtered': True, 'symbol': symbol, 'reason': 'exclusive'},
+                    reason=filter_reason
+                )
+
+                results.append({
+                    'symbol': symbol,
+                    'action': 'filter',
+                    'reason': filter_reason
+                })
+                continue
+
+            # 2.3 检查市值保护（如果同名新币已达100k市值，则不再买入其副本）
+            token_name = token.get('token_name', '')
+            is_high_cap, high_cap_reason = is_duplicate_name_high_cap(symbol, token_name)
+            if is_high_cap:
+                filter_reason = f'市值保护过滤: {high_cap_reason}'
+                print(f"[Trade] 过滤新币 {symbol}: {filter_reason}", flush=True)
+
+                # 记录到交易历史
+                log_trade(
+                    position_id='',
+                    action='filter',
+                    token_symbol=symbol,
+                    address=address,
+                    amount=0,
+                    price=token.get('price', '0'),
+                    mcap=float(token.get('market_cap', 0) or token.get('marketCap', 0) or 0),
+                    response={'filtered': True, 'symbol': symbol, 'reason': 'high_cap_protection'},
                     reason=filter_reason
                 )
 
