@@ -218,7 +218,7 @@ def process_news_item(news_data, full_content, all_images):
         if exclusive_tokens:
             blacklist = load_exclusive_blacklist()
             blacklist_lower = [b.lower() for b in blacklist]
-            filtered_exclusive = [t for t in exclusive_tokens if t.get('address', '').lower() not in blacklist_lower]
+            filtered_exclusive = [t for t in exclusive_tokens if t.get('tokenAddress', '').lower() not in blacklist_lower]
 
         # 3. 启动统一撮合逻辑 (新币 + 老币)
         orchestrator.handle_news(news_data, tweet_text, all_images, current_tokens, filtered_exclusive)
