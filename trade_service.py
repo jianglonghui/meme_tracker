@@ -67,6 +67,9 @@ stats = {
 # 持仓数据: {position_id: {...}}
 positions = {}
 positions_lock = threading.Lock()
+# 观察队列: [{time: 加入时间, data: token_data, trigger: trigger_type, source: source, news_time: news_time}]
+pending_buy_orders = []
+pending_lock = threading.Lock()
 
 # 交易历史
 trade_history = []
@@ -537,15 +540,53 @@ def get_token_mcap_binance(address):
                 for token in tokens:
                     if token.get('contractAddress', '').lower() == address.lower():
                         mcap = float(token.get('marketCap', 0) or 0)
+                        holders = int(token.get('holders', 0) or 0)
                         if mcap > 0:
                             return {
                                 'market_cap': mcap,
+                                'holders': holders,
                                 'price': str(token.get('price', '0')),
                                 'source': 'binance'
                             }
     except Exception as e:
         print(f"[Trade] Binance 查询失败 {address[:10]}...: {e}", flush=True)
     return None
+
+
+def get_dev_info(address):
+    """从 Binance API 获取 Dev 钱包的 PnL 数据"""
+    try:
+        url = f"{config.BINANCE_DEV_INFO_URL}&contractAddress={address}"
+        resp = requests.get(
+            url,
+            headers=config.HEADERS,
+            cookies=config.COOKIES,
+            proxies=config.PROXIES,
+            timeout=10
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get('code') == '000000':
+                traders = data.get('data', []) or []
+                for trader in traders:
+                    # 查找包含 "Dev" 标签的条目
+                    is_dev = False
+                    for tag in trader.get('addressTagList', []):
+                        if tag.get('tagName') == 'Dev':
+                            is_dev = True
+                            break
+                    
+                    if is_dev:
+                        buy_usd = float(trader.get('buyAmtUsd', 0) or 0)
+                        sell_usd = float(trader.get('sellAmtUsd', 0) or 0)
+                        return {
+                            'buy_amt_usd': buy_usd,
+                            'sell_amt_usd': sell_usd,
+                            'net_amt_usd': buy_usd - sell_usd
+                        }
+    except Exception as e:
+        print(f"[Trade] Dev 信息查询失败 {address[:10]}...: {e}", flush=True)
+    return {'buy_amt_usd': 0, 'sell_amt_usd': 0, 'net_amt_usd': 0}
 
 
 def get_token_mcap(address):
@@ -908,6 +949,65 @@ def monitor_positions():
             time.sleep(5)
 
 
+def monitor_pending_orders():
+    """持续监控观察队列中的代币，满足条件时执行买入"""
+    print("[Trade] 观察队列监控线程启动", flush=True)
+    while stats['running']:
+        try:
+            time.sleep(2) # 每 2 秒检查一次
+            
+            with pending_lock:
+                if not pending_buy_orders:
+                    continue
+                
+                current_time = time.time()
+                remaining_orders = []
+                
+                for order in pending_buy_orders:
+                    # 1. 检查是否过期 (1 分钟)
+                    if current_time - order['time'] > 60:
+                        print(f"[Trade] {order['data']['token_symbol']} 观察超时 (1分钟)，已丢弃", flush=True)
+                        continue
+                    
+                    # 2. 检查当前指标
+                    address = order['data']['token_address']
+                    data = get_token_mcap(address)
+                    dev_info = get_dev_info(address)
+                    
+                    if data:
+                        mcap = data.get('market_cap', 0)
+                        holders = data.get('holders', 0)
+                        dev_buy = dev_info['buy_amt_usd']
+                        dev_net = dev_info['net_amt_usd']
+                        
+                        # 同步满足两个维度:
+                        # 1) 人数 > 5 或 市值 > 8k
+                        # 2) Dev买入 > 500 且 净买入 > 500
+                        threshold_ok = (holders >= 5 or mcap >= 8000)
+                        dev_ok = (dev_buy > 500 and dev_net > 500)
+                        
+                        if threshold_ok and dev_ok:
+                            print(f"[Trade] {order['data']['token_symbol']} 观察中满足全部条件 (H:{holders}, M:{mcap:.0f}, DevB:{dev_buy:.0f}, DevN:{dev_net:.0f})，执行买入", flush=True)
+                            token_data = order['data'].copy()
+                            token_data['market_cap'] = mcap
+                            token_data['holders'] = holders
+                            token_data['dev_buy_usd'] = dev_buy
+                            token_data['dev_net_usd'] = dev_net
+                            execute_buy(token_data, order['trigger'], order['source'], order['news_time'])
+                        else:
+                            # 还不满足，继续留在队列
+                            remaining_orders.append(order)
+                    else:
+                        # 查询失败，继续留在队列
+                        remaining_orders.append(order)
+                
+                pending_buy_orders[:] = remaining_orders
+                
+        except Exception as e:
+            log_error(f"观察队列监控异常: {e}")
+            time.sleep(5)
+
+
 # ==================== Flask API ====================
 
 @app.route('/health')
@@ -1120,21 +1220,71 @@ def receive_signal():
         }
 
         # 执行买入（传递 token_source 和 news_time 用于延迟判断）
-        position_id = execute_buy(token_data, trigger_type, token_source, news_time)
-
-        if position_id:
-            results.append({
-                'symbol': symbol,
-                'action': 'buy',
-                'position_id': position_id,
-                'trigger': trigger_type
-            })
+        if is_new_token:
+            mcap = float(token.get('market_cap', 0) or token.get('marketCap', 0) or 0)
+            holders = int(token.get('holders', 0) or 0)
+            
+            # 获取 Dev 信息
+            dev_info = get_dev_info(address)
+            dev_buy = dev_info['buy_amt_usd']
+            dev_net = dev_info['net_amt_usd']
+            
+            # 满足条件: (人数 >= 5 或 市值 >= 8000) 且 (Dev买入 > 500 且 净买入 > 500)
+            threshold_ok = (holders >= 5 or mcap >= 8000)
+            dev_ok = (dev_buy > 500 and dev_net > 500)
+            
+            if threshold_ok and dev_ok:
+                position_id = execute_buy(token_data, trigger_type, token_source, news_time)
+                if position_id:
+                    results.append({
+                        'symbol': symbol,
+                        'action': 'buy',
+                        'position_id': position_id,
+                        'trigger': trigger_type
+                    })
+                else:
+                    results.append({
+                        'symbol': symbol,
+                        'action': 'skip',
+                        'reason': '买入失败或已持有'
+                    })
+            else:
+                # 不满足条件，加入观察队列
+                with pending_lock:
+                    # 检查是否已在队列中
+                    exists_in_pending = any(p['data']['token_address'].lower() == address.lower() for p in pending_buy_orders)
+                    if not exists_in_pending:
+                        pending_buy_orders.append({
+                            'time': time.time(),
+                            'data': token_data,
+                            'trigger': trigger_type,
+                            'source': token_source,
+                            'news_time': news_time
+                        })
+                        reason = f"H:{holders}, M:{mcap:.0f}, DevB:{dev_buy:.0f}, DevN:{dev_net:.0f}"
+                        print(f"[Trade] {symbol} 不满足买入条件 ({reason}), 进入观察队列", flush=True)
+                    
+                results.append({
+                    'symbol': symbol,
+                    'action': 'pending',
+                    'reason': f'等待人数/市值 或 Dev买入({dev_buy:.0f}/500, 净:{dev_net:.0f}/500)'
+                })
         else:
-            results.append({
-                'symbol': symbol,
-                'action': 'skip',
-                'reason': '买入失败或已持有'
-            })
+            # 老币逻辑维持原样
+            position_id = execute_buy(token_data, trigger_type, token_source, news_time)
+            if position_id:
+                results.append({
+                    'symbol': symbol,
+                    'action': 'buy',
+                    'position_id': position_id,
+                    'trigger': trigger_type
+                })
+            else:
+                results.append({
+                    'symbol': symbol,
+                    'action': 'skip',
+                    'reason': '买入失败或已持有'
+                })
 
     return jsonify({'success': True, 'results': results})
 
@@ -1339,9 +1489,13 @@ def recent():
     with error_lock:
         errors = list(reversed(recent_errors))[:10]
 
+    with pending_lock:
+        pending = [p.copy() for p in pending_buy_orders]
+
     return jsonify({
         'positions': active_positions,
         'trades': recent_trades,
+        'pending_buys': pending,
         'errors': errors
     })
 
@@ -1366,6 +1520,10 @@ def run():
     # 启动市值监控线程
     monitor_thread = threading.Thread(target=monitor_positions, daemon=True)
     monitor_thread.start()
+
+    # 启动观察队列监控线程
+    pending_thread = threading.Thread(target=monitor_pending_orders, daemon=True)
+    pending_thread.start()
 
     app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
 

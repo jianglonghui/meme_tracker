@@ -351,35 +351,33 @@ def match_new_tokens(news_time, tweet_text, image_urls=None, tweet_id=None):
     return ai_result, len(window_tokens), window_token_names
 
 
-# def match_exclusive_tokens(tweet_text, image_urls=None):
-#     print("start match")
-#     """匹配优质代币（老币） (保留原接口兼容性)"""
-#     if not tweet_text:
-#         return []
-# 
-#     all_tokens = get_exclusive_tokens()
-#     if not all_tokens:
-#         return []
-# 
-#     # 过滤黑名单（支持新币的 tokenAddress 和老币的 address 字段）
-#     blacklist = load_exclusive_blacklist()
-#     blacklist_lower = [b.lower() for b in blacklist]
-#     tokens = [t for t in all_tokens 
-#               if (t.get('tokenAddress', '') or t.get('address', '')).lower() not in blacklist_lower]
-# 
-#     if not tokens:
-#         return []
-# 
-#     # 使用重构后的 Engine
-#     local_cache = set() # 老币匹配目前不强依赖同一条推文内的 local_cache，但可以传入
-#     
-#     hardcoded_result = []
-#     if stats['enable_hardcoded_match']:
-#         hardcoded_result = run_hardcoded_engine(tweet_text, tokens, local_cache, source='exclusive')
-#         if hardcoded_result:
-#             # 兼容格式转换
-#             return hardcoded_result
-# 
-#     ai_result = run_ai_engine(tweet_text, tokens, image_urls, local_cache, source='exclusive')
-#     return ai_result
+def match_exclusive_tokens(tweet_text, image_urls=None):
+    """匹配优质代币（老币） (保留原接口兼容性)"""
+    if not tweet_text:
+        return []
+
+    all_tokens = get_exclusive_tokens()
+    if not all_tokens:
+        return []
+
+    # 过滤黑名单（支持新币的 tokenAddress 和老币的 address 字段）
+    blacklist = load_exclusive_blacklist()
+    blacklist_lower = [b.lower() for b in blacklist]
+    tokens = [t for t in all_tokens 
+              if (t.get('tokenAddress', '') or t.get('address', '')).lower() not in blacklist_lower]
+
+    if not tokens:
+        return []
+
+    # 使用重构后的 Engine
+    local_cache = set() # 老币匹配目前不强依赖同一条推文内的 local_cache，但可以传入
+    
+    hardcoded_result = []
+    if stats['enable_hardcoded_match']:
+        hardcoded_result = run_hardcoded_engine(tweet_text, tokens, local_cache, source='exclusive')
+        if hardcoded_result:
+            # 兼容格式转换
+            return hardcoded_result
+
+    ai_result = run_ai_engine(tweet_text, tokens, image_urls, local_cache, source='exclusive')
     return ai_result

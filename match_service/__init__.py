@@ -46,6 +46,7 @@ def send_to_trade_service(news_data, matched_tokens):
                 'token_name': t.get('tokenName', ''),
                 'chain': t.get('chain', 'BSC'),
                 'market_cap': t.get('marketCap', 0),
+                'holders': int(t.get('holders', 0) or 0),
                 'price': t.get('price', '0'),
                 'source': t.get('_token_source') or t.get('source', 'new'),
             })
@@ -246,6 +247,8 @@ def fetch_token_stream():
                                     token_list.pop(0)
                                 # 触发 Orchestrator 增量匹配
                                 orchestrator.handle_token(data)
+                            else:
+                                print(f"[Match] 代币已存在 (去重): {data.get('tokenSymbol')} - {data.get('tokenAddress')}", flush=True)
         except Exception as e:
             log_error(f"代币流: {e}")
             time.sleep(2)

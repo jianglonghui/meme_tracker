@@ -670,6 +670,9 @@ HTML_TEMPLATE = """
             alphaLoading: false,
             exclusiveError: null,
             alphaError: null,
+            sortOrder: 'desc', // 'desc' or 'asc'
+            sortBy: 'time',    // 'time' or 'volume'
+            excludeBlacklistFromStats: true,
         };
 
         // 兼容旧变量（渐进重构，避免大面积改动）
@@ -759,6 +762,45 @@ HTML_TEMPLATE = """
             tokenChainFilter = chain;
             lastServiceData['token_service'] = '';  // 强制刷新
             refresh();
+        }
+
+        function toggleTokenSort() {
+            tokenState.sortOrder = tokenState.sortOrder === 'desc' ? 'asc' : 'desc';
+            lastServiceData['token_service'] = ''; // 强制刷新渲染
+            refresh();
+        }
+
+        function setTokenSortBy(field) {
+            if (tokenState.sortBy === field) {
+                tokenState.sortOrder = tokenState.sortOrder === 'desc' ? 'asc' : 'desc';
+            } else {
+                tokenState.sortBy = field;
+                tokenState.sortOrder = 'desc';
+            }
+            lastServiceData['token_service'] = ''; // 强制刷新渲染
+            refresh();
+        }
+
+        function toggleExcludeBlacklistFromStats() {
+            tokenState.excludeBlacklistFromStats = !tokenState.excludeBlacklistFromStats;
+            lastServiceData['token_service'] = ''; // 强制刷新渲染
+            refresh();
+        }
+
+        function calculateStats(values) {
+            if (!values || values.length === 0) return { avg: 0, med: 0 };
+            const numericValues = values.map(v => parseFloat(v) || 0).sort((a, b) => a - b);
+            const sum = numericValues.reduce((a, b) => a + b, 0);
+            const avg = sum / numericValues.length;
+            const mid = Math.floor(numericValues.length / 2);
+            const med = numericValues.length % 2 !== 0 ? numericValues[mid] : (numericValues[mid - 1] + numericValues[mid]) / 2;
+            return { avg, med };
+        }
+
+        function formatStat(val) {
+            if (val >= 1000000) return (val / 1000000).toFixed(1) + 'M';
+            if (val >= 1000) return (val / 1000).toFixed(1) + 'k';
+            return val.toFixed(1);
         }
 
         async function toggleExclusiveMode() {
@@ -1638,6 +1680,20 @@ HTML_TEMPLATE = """
                                     </div>` : ''}
                                 </div>
                                 <div style="display:flex;gap:4px">
+                                    ${isSpecialMode ? `
+                                        <button onclick="setTokenSortBy('time')" style="background:${tokenState.sortBy==='time'?'#F0B90B':'#363c45'};color:${tokenState.sortBy==='time'?'#000':'#fff'};border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:10px">
+                                            时间 ${tokenState.sortBy==='time'?(tokenState.sortOrder === 'desc' ? '▼' : '▲'):''}
+                                        </button>
+                                        <button onclick="setTokenSortBy('volume')" style="background:${tokenState.sortBy==='volume'?'#F0B90B':'#363c45'};color:${tokenState.sortBy==='volume'?'#000':'#fff'};border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:10px">
+                                            量 ${tokenState.sortBy==='volume'?(tokenState.sortOrder === 'desc' ? '▼' : '▲'):''}
+                                        </button>
+                                        <button onclick="setTokenSortBy('marketCap')" style="background:${tokenState.sortBy==='marketCap'?'#F0B90B':'#363c45'};color:${tokenState.sortBy==='marketCap'?'#000':'#fff'};border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:10px">
+                                            市值 ${tokenState.sortBy==='marketCap'?(tokenState.sortOrder === 'desc' ? '▼' : '▲'):''}
+                                        </button>
+                                        <button onclick="setTokenSortBy('holders')" style="background:${tokenState.sortBy==='holders'?'#F0B90B':'#363c45'};color:${tokenState.sortBy==='holders'?'#000':'#fff'};border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:10px">
+                                            人数 ${tokenState.sortBy==='holders'?(tokenState.sortOrder === 'desc' ? '▼' : '▲'):''}
+                                        </button>
+                                    ` : ''}
                                     ${(showExclusive || showAlpha) && tradeWhitelistMode ? `
                                         <button id="confirmTradeWhitelistBtn" onclick="confirmAddToTradeWhitelist()" style="background:#0ecb81;color:#fff;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:10px">确认加入</button>
                                         <button onclick="cancelTradeWhitelistMode()" style="background:#363c45;color:#eaecef;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;font-size:10px">取消</button>
@@ -1657,7 +1713,63 @@ HTML_TEMPLATE = """
                                     `}
                                 </div>
                             </div>`;
+
+                        if (isSpecialMode && filteredItems.length > 0) {
+                            // 统计数据时可选排除黑名单
+                            const statsItems = tokenState.excludeBlacklistFromStats
+                                ? filteredItems.filter(r => !tokenState.blacklistSet.has((r.address || '').toLowerCase()))
+                                : filteredItems;
+
+                            const mcStats = calculateStats(statsItems.map(r => r.marketCap));
+                            const holderStats = calculateStats(statsItems.map(r => r.holders));
+                            const volStats = calculateStats(statsItems.map(r => r.volume24h));
+
+                            dataHtml += `<div style="background:#2b3139;padding:6px 10px;border-radius:4px;margin-bottom:8px;font-size:10px">
+                                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+                                    <div style="color:#848e9c">📊 统计摘要 (${statsItems.length}个代币)</div>
+                                    <label style="display:flex;align-items:center;cursor:pointer;color:#848e9c;font-size:9px">
+                                        <input type="checkbox" ${tokenState.excludeBlacklistFromStats ? 'checked' : ''} onchange="toggleExcludeBlacklistFromStats()" style="margin-right:4px;width:10px;height:10px">
+                                        排除黑名单
+                                    </label>
+                                </div>
+                                <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
+                                    <div>
+                                        <div style="color:#848e9c">市值 (MC)</div>
+                                        <div style="color:#eaecef">Avg:${formatStat(mcStats.avg)} | Med:${formatStat(mcStats.med)}</div>
+                                    </div>
+                                    <div>
+                                        <div style="color:#848e9c">持有 (Holders)</div>
+                                        <div style="color:#eaecef">Avg:${formatStat(holderStats.avg)} | Med:${formatStat(holderStats.med)}</div>
+                                    </div>
+                                    <div>
+                                        <div style="color:#848e9c">成交 (Vol)</div>
+                                        <div style="color:#eaecef">Avg:${formatStat(volStats.avg)} | Med:${formatStat(volStats.med)}</div>
+                                    </div>
+                                </div>
+                            </div>`;
+                        }
+
                         if (filteredItems.length > 0) {
+                            // 优质/Alpha 模式下执行排序
+                            if (isSpecialMode) {
+                                filteredItems.sort((a, b) => {
+                                    let valA, valB;
+                                    if (tokenState.sortBy === 'volume') {
+                                        valA = a.volume24h || 0;
+                                        valB = b.volume24h || 0;
+                                    } else if (tokenState.sortBy === 'marketCap') {
+                                        valA = a.marketCap || 0;
+                                        valB = b.marketCap || 0;
+                                    } else if (tokenState.sortBy === 'holders') {
+                                        valA = a.holders || 0;
+                                        valB = b.holders || 0;
+                                    } else {
+                                        valA = a.time || 0;
+                                        valB = b.time || 0;
+                                    }
+                                    return tokenState.sortOrder === 'desc' ? valB - valA : valA - valB;
+                                });
+                            }
                             dataHtml += `<div class="data-list">${filteredItems.map(r => {
                                     const chainBadge = r.chain === 'SOL' ? '<span style="background:#9945FF;color:#fff;padding:1px 4px;border-radius:3px;font-size:9px;margin-right:4px">SOL</span>' : (r.chain === 'TEST' ? '<span style="background:#848e9c;color:#fff;padding:1px 4px;border-radius:3px;font-size:9px;margin-right:4px">TEST</span>' : '<span style="background:#F0B90B;color:#000;padding:1px 4px;border-radius:3px;font-size:9px;margin-right:4px">BSC</span>');
                                     const shortCa = r.address ? (r.address.length > 16 ? r.address.slice(0,8) + '...' + r.address.slice(-6) : r.address) : '';
@@ -1686,7 +1798,8 @@ HTML_TEMPLATE = """
                                     }
 
                                     const timeStr = isSpecialMode ? formatDateTime(r.time/1000) : formatTime(r.time/1000);
-                                    return `<div class="data-item">${prefixHtml}${chainBadge}<span class="symbol" style="cursor:pointer" title="点击复制" onclick="copyText('${r.symbol}')">${r.symbol}</span> ${r.name}${caHtml} <span class="time">${timeStr} | MC:${r.marketCap} H:${r.holders}${extraInfo}</span></div>`;
+                                    const volStr = r.volume24h ? `| V:${(r.volume24h/1000).toFixed(1)}k` : '';
+                                    return `<div class="data-item">${prefixHtml}${chainBadge}<span class="symbol" style="cursor:pointer" title="点击复制" onclick="copyText('${r.symbol}')">${r.symbol}</span> ${r.name}${caHtml} <span class="time">${timeStr} | MC:${r.marketCap} H:${r.holders}${volStr}${extraInfo}</span></div>`;
                                 }).join('')}</div>`;
                         } else {
                             // 根据加载状态显示不同消息

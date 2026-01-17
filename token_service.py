@@ -170,7 +170,7 @@ def fetch_tokens_for_chain(chain):
         "chainId": chain["chainId"],
         "rankType": 10,
         "protocol": chain["protocol"],
-        "holdersMin": 10
+        "holdersMin": 1
     }
     try:
         response = requests.post(
